@@ -87,8 +87,14 @@ Frame cost breakdown at the canonical tile: simulation **0.17 ms** (flat, and
 independent of window size by construction), background 1.0 ms, organism
 9.7 ms, chrome 0.6 ms.
 
-Memory: ~92 MB RSS. No growth over the 6-cycle run. `tracemalloc` shows ~0
-bytes net over 500 steady-state `update()` calls.
+Footprint at the canonical tile, measured over 15 s of steady animation:
+
+* **RSS 156 MB**, growth **+0.43 MB / 15 s** (allocator noise, not a leak —
+  `tracemalloc` shows ~0 bytes net over 500 steady-state `update()` calls)
+* **CPU 81% of one core** = 5.1% of the 16-thread machine, at ~68 fps
+
+The RSS is dominated by the Python + GTK4 + NumPy runtime, not by the
+simulation (the organism's arrays total under 1 MB and are allocated once).
 
 **The 60 fps target is met at the canonical tile and below. It is not met at
 large sizes** — see Known limitations.
@@ -125,5 +131,11 @@ large sizes** — see Known limitations.
    190px column on a 2000px window is inherently sparse.
 4. At 180x120 the meters are dropped entirely and only labels plus values
    survive. Pure triage, by design.
-5. Single organism, single specimen, no persistence, no settings — deliberate
+5. **It renders every frame the compositor offers.** At ~68 fps that is 81% of
+   one core, which is fine for a focused window but wasteful for a widget left
+   open all day. The organism moves slowly enough that a frame cap would be
+   invisible; the cheap fix is to skip ticks in `Monitor._on_tick` against a
+   target interval (a `--fps` flag). Not done here because the gates had
+   already passed and it is not needed to prove the foundation.
+6. Single organism, single specimen, no persistence, no settings — deliberate
    POC scope.
