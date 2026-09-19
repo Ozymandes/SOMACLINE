@@ -22,9 +22,24 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRATCH = os.environ.get("ABYSSAL_SCRATCH", "/tmp/claude-1000/abyssal-qa")
 
 
+# NOTE: Hyprland 0.56 on Omarchy fronts hyprctl (and the IPC socket) with a
+# LUA dispatcher API. The classic `hyprctl dispatch resizeactive exact 900 700`
+# string form is a syntax error here; it must be
+# `hyprctl dispatch "hl.dsp.window.resize({ x = 900, y = 700, exact = true })"`.
+# Getting this wrong fails SILENTLY as far as window size is concerned, which
+# is how the first run of this harness produced a false negative.
+
 def hypr(*args: str) -> str:
     return subprocess.run(["hyprctl", *args], capture_output=True,
                           text=True).stdout.strip()
+
+
+def dsp(expr: str) -> str:
+    """Run one Lua dispatcher expression; raise if Hyprland rejects it."""
+    out = hypr("dispatch", expr)
+    if out.startswith("error"):
+        raise RuntimeError(f"hyprctl rejected {expr!r}: {out.splitlines()[0]}")
+    return out
 
 
 def clients() -> list[dict]:
@@ -42,7 +57,24 @@ def find_win(pid: int) -> dict | None:
 
 
 def focus(addr: str) -> None:
-    hypr("dispatch", "focuswindow", f"address:{addr}")
+    dsp(f"hl.dsp.focus({{ window = 'address:{addr}' }})")
+
+
+def d_float(on: bool) -> str:
+    return f"hl.dsp.window.float({{ action = '{'on' if on else 'off'}' }})"
+
+
+def d_fullscreen(mode: str) -> str:
+    return f"hl.dsp.window.fullscreen({{ mode = '{mode}', action = 'toggle' }})"
+
+
+def d_resize(w: int, h: int) -> str:
+    return f"hl.dsp.window.resize({{ x = {w}, y = {h}, exact = true }})"
+
+
+def d_nudge(dx: int, dy: int) -> str:
+    """Relative resize — this is what moves a TILED window's split."""
+    return f"hl.dsp.window.resize({{ x = {dx}, y = {dy}, relative = true }})"
 
 
 def wait_for_window(pid: int, timeout: float = 15.0) -> dict:
@@ -89,10 +121,17 @@ class Torture:
 
     def spawn_ghost(self) -> None:
         """A second tiled window, so the monitor is forced to share the tile."""
-        p = subprocess.Popen(["alacritty", "-e", "sleep", "9000"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.ghosts.append(p)
-        settle(0.9)
+        import shutil
+        for term in ("foot", "alacritty", "kitty", "ghostty"):
+            if shutil.which(term):
+                p = subprocess.Popen([term, "-e", "sleep", "9000"],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+                self.ghosts.append(p)
+                settle(1.2)
+                print(f"  ghost tile: {term}")
+                return
+        print("  (no terminal found; splitratio steps will be no-ops)")
 
     def cleanup(self) -> None:
         for g in self.ghosts:
@@ -111,10 +150,10 @@ class Torture:
         return self.proc is not None and self.proc.poll() is None
 
     # -- steps -----------------------------------------------------------
-    def step(self, name: str, *dispatch: str, shot: bool = False) -> None:
-        if dispatch:
+    def step(self, name: str, expr: str = "", shot: bool = False) -> None:
+        if expr:
             focus(self.addr)
-            hypr("dispatch", *dispatch)
+            dsp(expr)
         settle()
         if not self.alive():
             raise RuntimeError(f"APP DIED during step '{name}' "
@@ -135,27 +174,31 @@ class Torture:
 
     def cycle(self, n: int) -> None:
         print(f"  --- cycle {n} ---")
-        self.step(f"c{n}-tile", "setfloating", "0", shot=True)
-        self.step(f"c{n}-tile-narrow", "splitratio", "exact", "0.32", shot=True)
-        self.step(f"c{n}-tile-wide", "splitratio", "exact", "0.80", shot=True)
-        self.step(f"c{n}-tile-mid", "splitratio", "exact", "0.55")
-        self.step(f"c{n}-fullscreen", "fullscreen", "0", shot=True)
-        self.step(f"c{n}-unfullscreen", "fullscreen", "0")
-        self.step(f"c{n}-maximize", "fullscreen", "1")
-        self.step(f"c{n}-unmaximize", "fullscreen", "1")
-        self.step(f"c{n}-float", "setfloating", "1", shot=True)
-        for w, h in [(420, 340), (700, 560), (900, 700), (1400, 860),
-                     (300, 900), (1800, 420), (240, 200)]:
-            self.step(f"c{n}-float-{w}x{h}", "resizeactive", "exact",
-                      str(w), str(h), shot=(w, h) in ((420, 340), (900, 700),
-                                                      (1400, 860), (240, 200)))
-        self.step(f"c{n}-retile", "setfloating", "0", shot=True)
+        self.step(f"c{n}-tile", d_float(False), shot=True)
+        # Tiled resizes: relative nudges move the split, which is what a user
+        # actually does with SUPER+arrow in a tiling WM.
+        self.step(f"c{n}-tile-narrow", d_nudge(-260, 0), shot=True)
+        self.step(f"c{n}-tile-narrower", d_nudge(-160, -120))
+        self.step(f"c{n}-tile-wide", d_nudge(500, 0), shot=True)
+        self.step(f"c{n}-tile-tall", d_nudge(0, 180))
+        self.step(f"c{n}-tile-back", d_nudge(-80, -60))
+        self.step(f"c{n}-fullscreen", d_fullscreen("fullscreen"), shot=True)
+        self.step(f"c{n}-unfullscreen", d_fullscreen("fullscreen"))
+        self.step(f"c{n}-maximize", d_fullscreen("maximized"), shot=True)
+        self.step(f"c{n}-unmaximize", d_fullscreen("maximized"))
+        self.step(f"c{n}-float", d_float(True), shot=True)
+        for w, h in [(420, 340), (700, 560), (900, 700), (1150, 720),
+                     (1400, 860), (300, 900), (1800, 420), (240, 200)]:
+            self.step(f"c{n}-float-{w}x{h}", d_resize(w, h),
+                      shot=(w, h) in ((420, 340), (900, 700),
+                                      (1400, 860), (240, 200)))
+        self.step(f"c{n}-retile", d_float(False), shot=True)
 
     def rapid_resize(self, seconds: float = 6.0) -> None:
         """Hammer resize far faster than a human can, to shake out races."""
         print("  --- rapid resize storm ---")
         focus(self.addr)
-        hypr("dispatch", "setfloating", "1")
+        dsp(d_float(True))
         settle(0.4)
         t0 = time.time()
         i = 0
@@ -163,7 +206,7 @@ class Torture:
         while time.time() - t0 < seconds:
             w = int(300 + 900 * (0.5 + 0.5 * math.sin(i * 0.4)))
             h = int(220 + 620 * (0.5 + 0.5 * math.cos(i * 0.31)))
-            hypr("dispatch", "resizeactive", "exact", str(w), str(h))
+            hypr("dispatch", d_resize(w, h))
             i += 1
             time.sleep(0.05)
         settle()
@@ -238,8 +281,9 @@ def main() -> int:
     ap.add_argument("--cycles", type=int, default=3)
     ap.add_argument("--workspace", type=int, default=9)
     ap.add_argument("--shots", action="store_true")
-    ap.add_argument("--ghost", action="store_true",
-                    help="also open a second tiled window to force sharing")
+    ap.add_argument("--no-ghost", dest="ghost", action="store_false",
+                    default=True,
+                    help="do not open a second tiled window")
     opts = ap.parse_args()
 
     os.makedirs(SCRATCH, exist_ok=True)
@@ -252,7 +296,7 @@ def main() -> int:
     t = Torture(opts)
     ok = False
     try:
-        hypr("dispatch", "workspace", str(opts.workspace))
+        dsp(f"hl.dsp.focus({{ workspace = '{opts.workspace}' }})")
         settle(0.5)
         print("LAUNCH")
         t.launch()
@@ -262,7 +306,7 @@ def main() -> int:
             t.cycle(n)
         t.rapid_resize()
         # end where we started: a normal tile
-        t.step("final-tile", "setfloating", "0", shot=True)
+        t.step("final-tile", d_float(False), shot=True)
         time.sleep(1.0)
         if not t.alive():
             raise RuntimeError("APP DIED at end of run")
@@ -273,7 +317,7 @@ def main() -> int:
     finally:
         t.cleanup()
         if original_ws:
-            hypr("dispatch", "workspace", str(original_ws))
+            hypr("dispatch", f"hl.dsp.focus({{ workspace = '{original_ws}' }})")
 
     passed, problems = analyse(t.probe) if os.path.exists(t.probe) else (False, ["no probe file"])
     print("\n=== GATE 0 ===")

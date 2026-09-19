@@ -82,8 +82,12 @@ class Monitor(Gtk.ApplicationWindow):
         self.area.set_draw_func(self._on_draw)
         self.set_child(self.area)
 
+        self._last_layout = None
+        self._last_vp = None
         self.area.add_tick_callback(self._on_tick)
         GLib.timeout_add(TELEMETRY_INTERVAL_MS, self._on_telemetry)
+        if self._probe:
+            GLib.timeout_add(2000, self._on_probe_sample)
 
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
@@ -117,6 +121,13 @@ class Monitor(Gtk.ApplicationWindow):
         self.telemetry = self.telemetry_src.sample()
         return GLib.SOURCE_CONTINUE
 
+    def _on_probe_sample(self) -> bool:
+        """Periodic steady-state sample, so FPS is measured while idle at a
+        size rather than only in the instant after a resize."""
+        if self._last_layout is not None:
+            self._log_probe(self._last_layout, self._last_vp, "sample")
+        return GLib.SOURCE_CONTINUE
+
     # ------------------------------------------------------------- frame loop
     def _on_tick(self, _widget, clock: Gdk.FrameClock) -> bool:
         now_us = clock.get_frame_time()
@@ -147,6 +158,7 @@ class Monitor(Gtk.ApplicationWindow):
                                 layout.stage.w, layout.stage.h)
         # (that is all — no allocation, no rebuild, no reset)
 
+        self._last_layout, self._last_vp = layout, vp
         if (width, height) != self.last_size:
             self.resizes += 1
             self.last_size = (width, height)

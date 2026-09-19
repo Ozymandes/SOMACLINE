@@ -114,48 +114,72 @@ def classify(width: float, height: float) -> LayoutState:
     return LayoutState.ARCHIVE
 
 
+# Per-state arrangement metrics: padding, header height, readout row height,
+# readout column width bounds, gap, and the minimum stage edge worth keeping.
+_METRICS = {
+    LayoutState.COMPACT:    dict(pad=12.0, head=34.0, row=46.0,
+                                 col=(112.0, 190.0), gap=8.0, min_stage=90.0),
+    LayoutState.INSTRUMENT: dict(pad=20.0, head=56.0, row=62.0,
+                                 col=(158.0, 260.0), gap=18.0, min_stage=150.0),
+    LayoutState.ARCHIVE:    dict(pad=30.0, head=72.0, row=74.0,
+                                 col=(200.0, 300.0), gap=26.0, min_stage=200.0),
+}
+
+# Above this body aspect the readouts move to a side column, so the organism
+# keeps a stage close to square instead of a wide letterboxed strip. This is
+# what makes a short wide Hyprland tile look deliberate rather than starved.
+SIDE_COLUMN_ASPECT = 1.45
+
+
 def resolve(width: float, height: float) -> Layout:
     w = max(float(width), 1.0)
     h = max(float(height), 1.0)
     state = classify(w, h)
+    m = _METRICS[state]
+    t = {LayoutState.COMPACT: _T_COMPACT,
+         LayoutState.INSTRUMENT: _T_INSTRUMENT,
+         LayoutState.ARCHIVE: _T_ARCHIVE}[state]
 
-    if state is LayoutState.COMPACT:
-        pad = 12.0
-        t = _T_COMPACT
-        head_h = min(34.0, h * 0.14)
-        read_h = min(46.0, h * 0.20)
-        header = Rect(pad, pad, w - 2 * pad, head_h)
-        readout = Rect(pad, h - pad - read_h, w - 2 * pad, read_h)
-        stage = Rect(pad, header.bottom + 4, w - 2 * pad,
-                     max(0.0, readout.y - header.bottom - 8))
-        meta = Rect(0, 0, 0, 0)
-        return Layout(state, w, h, pad, header, stage, readout, meta, t,
-                      show_subtitle=False, show_meta=False,
-                      readout_vertical=False)
+    pad = m["pad"]
+    content = Rect(pad, pad, max(0.0, w - 2 * pad), max(0.0, h - 2 * pad))
 
-    if state is LayoutState.INSTRUMENT:
-        pad = 20.0
-        t = _T_INSTRUMENT
-        head_h = min(56.0, h * 0.16)
-        read_h = min(62.0, h * 0.20)
-        header = Rect(pad, pad, w - 2 * pad, head_h)
-        readout = Rect(pad, h - pad - read_h, w - 2 * pad, read_h)
-        stage = Rect(pad, header.bottom + 10, w - 2 * pad,
-                     max(0.0, readout.y - header.bottom - 22))
-        meta = Rect(0, 0, 0, 0)
-        return Layout(state, w, h, pad, header, stage, readout, meta, t,
-                      show_subtitle=True, show_meta=False,
-                      readout_vertical=False)
+    head_h = min(m["head"], content.h * 0.22)
+    header = Rect(content.x, content.y, content.w, head_h)
+    gap = m["gap"]
+    body = Rect(content.x, header.bottom + gap * 0.55,
+                content.w, max(0.0, content.h - head_h - gap * 0.55))
 
-    # ARCHIVE: side instrument column on the right, organism keeps the left.
-    pad = 30.0
-    t = _T_ARCHIVE
-    col_w = min(300.0, max(220.0, w * 0.24))
-    head_h = min(72.0, h * 0.14)
-    header = Rect(pad, pad, w - 2 * pad - col_w - 28, head_h)
-    meta = Rect(w - pad - col_w, pad, col_w, h - 2 * pad)
-    readout = Rect(meta.x, meta.y + 108, col_w, meta.h - 108)
-    stage = Rect(pad, header.bottom + 14, w - 2 * pad - col_w - 28,
-                 max(0.0, h - pad - header.bottom - 14))
-    return Layout(state, w, h, pad, header, stage, readout, meta, t,
-                  show_subtitle=True, show_meta=True, readout_vertical=True)
+    aspect = body.w / max(body.h, 1.0)
+    col_lo, col_hi = m["col"]
+    use_column = False
+    col_w = 0.0
+    if aspect >= SIDE_COLUMN_ASPECT and body.w > col_lo + m["min_stage"] + gap:
+        col_w = min(col_hi, max(col_lo, body.w * 0.30))
+        if body.w - col_w - gap >= m["min_stage"]:
+            use_column = True
+
+    if use_column:
+        readout = Rect(body.right - col_w, body.y, col_w, body.h)
+        stage = Rect(body.x, body.y, body.w - col_w - gap, body.h)
+    else:
+        row_h = min(m["row"], body.h * 0.26)
+        readout = Rect(body.x, body.bottom - row_h, body.w, row_h)
+        stage = Rect(body.x, body.y, body.w, max(0.0, body.h - row_h - gap * 0.6))
+
+    # ARCHIVE keeps a quiet metadata block at the top of its side column.
+    show_meta = state is LayoutState.ARCHIVE and use_column and readout.h > 300.0
+    if show_meta:
+        meta_h = min(150.0, readout.h * 0.34)
+        meta = Rect(readout.x, readout.y, readout.w, meta_h)
+        readout = Rect(readout.x, meta.bottom + gap, readout.w,
+                       max(0.0, readout.h - meta_h - gap))
+    else:
+        meta = Rect(0.0, 0.0, 0.0, 0.0)
+
+    return Layout(
+        state=state, width=w, height=h, pad=pad,
+        header=header, stage=stage, readout=readout, meta=meta, type=t,
+        show_subtitle=(state is not LayoutState.COMPACT and content.w > 360.0),
+        show_meta=show_meta,
+        readout_vertical=use_column,
+    )
