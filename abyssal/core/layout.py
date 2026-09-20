@@ -82,9 +82,13 @@ class Layout:
     stage: Rect              # organism lives here, and ONLY here
     readout: Rect            # telemetry row / strip
     meta: Rect               # extra metadata column (ARCHIVE only; may be invalid)
+    controls: Rect           # specimen selector bank + mode key (may be invalid)
+    footer: Rect             # archive / status rail (may be invalid)
     type: TypeScale
     show_subtitle: bool
     show_meta: bool
+    show_controls: bool
+    show_footer: bool
     readout_vertical: bool   # readouts stacked in a column (ARCHIVE side panel)
 
 
@@ -119,16 +123,35 @@ def classify(width: float, height: float) -> LayoutState:
 _METRICS = {
     LayoutState.COMPACT:    dict(pad=12.0, head=34.0, row=46.0,
                                  col=(112.0, 190.0), gap=8.0, min_stage=90.0),
-    LayoutState.INSTRUMENT: dict(pad=20.0, head=56.0, row=62.0,
-                                 col=(158.0, 260.0), gap=18.0, min_stage=150.0),
-    LayoutState.ARCHIVE:    dict(pad=30.0, head=72.0, row=74.0,
-                                 col=(200.0, 300.0), gap=26.0, min_stage=200.0),
+    LayoutState.INSTRUMENT: dict(pad=20.0, head=66.0, row=62.0,
+                                 col=(170.0, 330.0), gap=18.0, min_stage=150.0),
+    LayoutState.ARCHIVE:    dict(pad=30.0, head=86.0, row=74.0,
+                                 col=(230.0, 460.0), gap=26.0, min_stage=200.0),
 }
 
 # Above this body aspect the readouts move to a side column, so the organism
 # keeps a stage close to square instead of a wide letterboxed strip. This is
 # what makes a short wide Hyprland tile look deliberate rather than starved.
 SIDE_COLUMN_ASPECT = 1.45
+
+# The selector bank is sized from the STAGE width, not the window width, so it
+# stays proportional to the specimen it switches. Clamped at both ends: too
+# short and the engraved labels stop being legible, too tall and a hero control
+# starts eating the organism.
+_BANK_ASPECT = (48.0 + 5 * 224.0 + 46.0) / 303.0     # tools/build_sprites.py
+_BANK_SHARE = 0.52          # of stage width
+_BANK_MIN_H = 30.0
+_BANK_MAX_H = {"COMPACT": 46.0, "INSTRUMENT": 86.0, "ARCHIVE": 128.0}
+_FOOTER_H = {"COMPACT": 0.0, "INSTRUMENT": 36.0, "ARCHIVE": 52.0}
+
+
+def bank_height(state: "LayoutState", stage_w: float, avail_h: float) -> float:
+    """Pure: how tall the control strip should be. Shared by layout and QA."""
+    want = (stage_w * _BANK_SHARE) / _BANK_ASPECT
+    hi = min(_BANK_MAX_H[state.value], avail_h)
+    if hi < _BANK_MIN_H:
+        return 0.0
+    return max(_BANK_MIN_H, min(want, hi))
 
 
 def resolve(width: float, height: float) -> Layout:
@@ -154,9 +177,19 @@ def resolve(width: float, height: float) -> Layout:
     use_column = False
     col_w = 0.0
     if aspect >= SIDE_COLUMN_ASPECT and body.w > col_lo + m["min_stage"] + gap:
-        col_w = min(col_hi, max(col_lo, body.w * 0.30))
+        col_w = min(col_hi, max(col_lo, body.w * 0.33))
         if body.w - col_w - gap >= m["min_stage"]:
             use_column = True
+
+    # The archive rail sits under everything, full width.
+    foot_h = _FOOTER_H[state.value]
+    if foot_h > 0.0 and body.h > foot_h * 5.0:
+        footer = Rect(body.x, body.bottom - foot_h, body.w, foot_h)
+        body = Rect(body.x, body.y, body.w, body.h - foot_h - gap * 0.45)
+        show_footer = True
+    else:
+        footer = Rect(0.0, 0.0, 0.0, 0.0)
+        show_footer = False
 
     if use_column:
         readout = Rect(body.right - col_w, body.y, col_w, body.h)
@@ -165,6 +198,18 @@ def resolve(width: float, height: float) -> Layout:
         row_h = min(m["row"], body.h * 0.26)
         readout = Rect(body.x, body.bottom - row_h, body.w, row_h)
         stage = Rect(body.x, body.y, body.w, max(0.0, body.h - row_h - gap * 0.6))
+
+    # The selector bank is carved from the STAGE, so it never overlaps the
+    # telemetry column and the organism keeps a clean rectangle above it.
+    bank_h = bank_height(state, stage.w, stage.h * 0.24)
+    if bank_h > 0.0 and stage.h - bank_h - gap * 0.5 >= m["min_stage"]:
+        controls = Rect(stage.x, stage.bottom - bank_h, stage.w, bank_h)
+        stage = Rect(stage.x, stage.y, stage.w,
+                     max(0.0, stage.h - bank_h - gap * 0.5))
+        show_controls = True
+    else:
+        controls = Rect(0.0, 0.0, 0.0, 0.0)
+        show_controls = False
 
     # ARCHIVE keeps a quiet metadata block at the top of its side column.
     show_meta = state is LayoutState.ARCHIVE and use_column and readout.h > 300.0
@@ -178,8 +223,11 @@ def resolve(width: float, height: float) -> Layout:
 
     return Layout(
         state=state, width=w, height=h, pad=pad,
-        header=header, stage=stage, readout=readout, meta=meta, type=t,
+        header=header, stage=stage, readout=readout, meta=meta,
+        controls=controls, footer=footer, type=t,
         show_subtitle=(state is not LayoutState.COMPACT and content.w > 360.0),
         show_meta=show_meta,
+        show_controls=show_controls,
+        show_footer=show_footer,
         readout_vertical=use_column,
     )

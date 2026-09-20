@@ -78,3 +78,105 @@ an unmapped or occluded window cannot teleport the organism on resume.
 `F1` overlay and `F2` calibration geometry are permanent product features.
 `--probe FILE` appends a JSONL geometry event per resize/state change, which is
 what `qa/torture.py` asserts against.
+
+---
+
+# The hardware skin
+
+Everything above still holds. The skin is a rendering layer bolted on top of it;
+nothing in `skin/`, `ui/console.py` or `ui/segment.py` can reach the simulation.
+
+## Pipeline
+
+```
+ assets/hardware_v2/    2K generated masters (out of git, ~171MB)
+   -> tools/build_sprites.py      ONE build step: slice, normalise, downsample
+ assets/sprites/        41 runtime PNGs, 12MB, committed
+   -> skin/surface.py             load once, 9-slice, cache by exact size
+   -> skin/catalog.py             which sprite, and how it may scale
+   -> ui/console.py               assemble panels, draw live content on top
+```
+
+The build step exists because the masters are 2688px wide and the generator
+would not hold a constant footprint across a family of state sprites. Slicing
+at build time makes alignment a property of the pipeline instead of a property
+of a prompt: `build_sprites.py` re-centres every lamp state onto one canvas and
+composites every selector key onto one canonical fascia.
+
+## 9-slice, and what is not 9-sliced
+
+A panel is split by four insets. Corners never scale, edges scale on one axis,
+the centre scales freely. That keeps screws circular and bevel crests sharp at
+any window size.
+
+Only true frames are 9-sliced: the observation bezel, the segment housings, the
+graph well, the meter trough, the aux frame and the generic plate.
+
+The composite panels of the reference machine - the chassis, the header, the
+rack, a telemetry module, the selector bank - are **arrangements, not frames**.
+The chassis has a viewport hole on the left and solid rack on the right, so it
+has no symmetric border to stretch; a module has three fixed recesses that would
+smear. Those are **assembled** at draw time from the primitives. That is why
+this pass needed no extra corner or edge art.
+
+Two rules were learned the hard way and are enforced in `skin/surface.py`:
+
+* **Borders and content pads shrink together.** The borders say where the metal
+  is painted; the pads say where the recess begins. Scaling one without the
+  other makes the app believe the glass starts where metal is still being drawn,
+  which is how a shrunken bezel covers its own viewport.
+* **A content pad is a SOURCE-space measurement, mapped through the slice.** A
+  pad inside the fixed border only shrinks; a pad past it rides the stretch.
+  Treating pads as drawn-space offsets puts text on the bevel crest.
+
+A raster bevel cannot shrink below its own thickness, so panels thinner than
+their bevel do not use one: the archive rail and the condensed telemetry strip
+are drawn procedurally by `console._rail`.
+
+## The cache, and why it does not violate the resize contract
+
+`skin/surface.py` keeps a bounded LRU of rendered panels keyed by
+`(panel, exact integer size)`. The contract above is about **geometry**, and it
+is untouched: nothing in this module can produce a Layout, a Viewport or a
+simulation value. What is cached is derived pixels, and the key is the complete
+set of inputs, so dropping the whole cache between any two frames would change
+performance and nothing else. `gate_resize_invariance` still reports
+bit-identical organisms.
+
+## Seven-segment
+
+`ui/segment.py` draws numerals as Cairo paths, not a font. No seven-segment face
+is installed, and a font could not give unlit ghost segments, thickness
+independent of glyph height, chamfered LED segment ends, or a bloom that tracks
+the lit colour. Geometry is authored in a unit cell and scaled, so it stays
+crisp at 11px and at 90px.
+
+## Lighting
+
+`core/lighting.py` collects emitters during a frame and paints them additively,
+with per-emitter strength, a radius ceiling and no intermediate group. The group
+was removed after measurement: it is sized to the current clip, and because the
+emitters are spread across the console their union covers most of the window,
+which cost 9.3ms at 1920x1080. See the module docstring for what that trades.
+
+## Specimens
+
+`organism/form.py` is the original Plumiradia solver with every hand-tuned
+constant lifted into `organism/morphology.py`. A species is a parameter block,
+not a new renderer, which is what makes the five read as one taxonomic family.
+
+The refactor matches the original to ~4e-13 world units - not bit-identical,
+because lifting constants reassociates a few floating point sums. That is ~12
+orders of magnitude below a device pixel.
+
+The original 4-quadrant balance check was replaced by ownership binning
+(`form.lobe_mass`): species with a wide barb splay push barbs across an angular
+sector boundary, so the old histogram measured the binning rather than the
+organism.
+
+## Selector
+
+`ui/selector.py::layout` is a pure function from a rect to key rectangles, and
+drawing, hit testing and QA all call it. The bank you can see and the bank you
+can click are the same bank by construction; GATE 6 asserts it at every layout
+size.

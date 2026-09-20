@@ -21,7 +21,11 @@ from abyssal.core.physiology import PhysiologyModel  # noqa: E402
 from abyssal.core.signals import Telemetry  # noqa: E402
 from abyssal.core.viewport import Viewport, isotropy_error  # noqa: E402
 from abyssal.core.world import WORLD_RADIUS  # noqa: E402
-from abyssal.organism.plumiradia import Plumiradia  # noqa: E402
+from abyssal.organism.form import AbyssalForm  # noqa: E402
+from abyssal.organism.morphology import QUADRILOBATA  # noqa: E402
+from abyssal.organism.species import by_index  # noqa: E402
+from abyssal.core.lighting import LightField  # noqa: E402
+from abyssal.ui import console  # noqa: E402
 from abyssal.organism.render import draw_organism  # noqa: E402
 from abyssal.ui.chrome import draw_background, draw_chrome  # noqa: E402
 
@@ -42,7 +46,7 @@ FAKE = Telemetry(cpu_load=0.42, memory_pressure=0.67, temperature=0.61,
 def gate1_geometry() -> tuple[bool, list[str]]:
     print("=== GATE 1 — GEOMETRY ===")
     problems: list[str] = []
-    org = Plumiradia()
+    org = AbyssalForm(QUADRILOBATA)
     pm = PhysiologyModel()
     # Drive to a hot state so the organism is at maximum extent.
     hot = Telemetry(cpu_load=1.0, memory_pressure=1.0, temperature=1.0,
@@ -54,14 +58,21 @@ def gate1_geometry() -> tuple[bool, list[str]]:
           f"{'iso_err':>9} {'r_px':>7} {'centre_err':>10} {'quad_bal':>8}")
     for w, h in SIZES:
         L = resolve(w, h)
-        vp = Viewport.for_stage(L.stage.x, L.stage.y, L.stage.w, L.stage.h)
+        glass = console.stage_content(L)
+        vp = Viewport.for_stage(glass.x, glass.y, glass.w, glass.h)
+        cm = console.ConsoleModel(species=by_index(0), active=0)
+        light = LightField()
 
         iso = isotropy_error(vp)
         if iso > 1e-6:
             problems.append(f"{w}x{h}: isotropy error {iso:.3e}px — stretched")
 
-        # Centre: the organism's pixel centre must equal the stage's centre.
-        cerr = math.hypot(vp.cx - L.stage.cx, vp.cy - L.stage.cy)
+        # Centre: the organism's pixel centre must equal the centre of the
+        # GLASS it is seen through, not of the raw stage. The bezel's aperture
+        # is very slightly off-centre in its own frame (96/100px left/right,
+        # 85/93 top/bottom in sprite space), so centring on the stage would
+        # sit the specimen a few pixels off inside the viewport it occupies.
+        cerr = math.hypot(vp.cx - glass.cx, vp.cy - glass.cy)
         if cerr > 1e-9:
             problems.append(f"{w}x{h}: off-centre by {cerr:.3e}px")
 
@@ -69,7 +80,7 @@ def gate1_geometry() -> tuple[bool, list[str]]:
         ext_px = max(math.hypot(x, y) for x, y in
                      zip(org.fil_x.ravel()[::7], org.fil_y.ravel()[::7])) * vp.scale
         room = min(vp.stage_w, vp.stage_h) / 2.0
-        if L.stage.valid and ext_px > room + 0.5:
+        if glass.valid and ext_px > room + 0.5:
             problems.append(f"{w}x{h}: organism {ext_px:.1f}px > {room:.1f}px — CLIPS")
 
         # Quadrant balance: mass per diagonal quadrant must match.
@@ -113,17 +124,20 @@ def _quadrant_mass(org) -> list[float]:
 def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
     print("\n=== GATE 3 — PERFORMANCE ===")
     problems: list[str] = []
-    org = Plumiradia()
+    org = AbyssalForm(QUADRILOBATA)
     pm = PhysiologyModel()
 
     bench = [(420, 340), (900, 700), (1400, 860), (1920, 1080), (2560, 1600)]
-    print(f"  {'size':>11} {'sim':>8} {'organism':>9} {'chrome':>8} "
+    print(f"  {'size':>11} {'sim':>8} {'organism':>9} {'console':>8} "
           f"{'total':>8} {'fps_cap':>8}")
     for w, h in bench:
         surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
         cr = cairo.Context(surf)
         L = resolve(w, h)
-        vp = Viewport.for_stage(L.stage.x, L.stage.y, L.stage.w, L.stage.h)
+        glass = console.stage_content(L)
+        vp = Viewport.for_stage(glass.x, glass.y, glass.w, glass.h)
+        cm = console.ConsoleModel(species=by_index(0), active=0)
+        light = LightField()
 
         n = 120
         for _ in range(12):  # warm
@@ -141,9 +155,14 @@ def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
             draw_organism(cr, vp, org)
         org_ms = (time.perf_counter() - t) / n * 1000
 
+        for _ in range(4):   # warm the skin cache at this exact size
+            console.draw_under(cr, L, cm)
+            console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
+
         t = time.perf_counter()
         for _ in range(n):
-            draw_chrome(cr, L, FAKE, 60.0, 16.6)
+            console.draw_under(cr, L, cm)
+            console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
         chr_ms = (time.perf_counter() - t) / n * 1000
 
         total = sim_ms + org_ms + chr_ms
@@ -156,8 +175,9 @@ def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
                             f"(> 16.6ms 60fps budget)")
         if outdir:
             draw_background(cr, w, h)
+            console.draw_under(cr, L, cm)
             draw_organism(cr, vp, org)
-            draw_chrome(cr, L, FAKE, 60.0, 16.6)
+            console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
             surf.write_to_png(os.path.join(outdir, f"gate-{w}x{h}.png"))
     return (not problems), problems
 
@@ -170,7 +190,7 @@ def gate_resize_invariance() -> tuple[bool, list[str]]:
     """
     print("\n=== RESIZE INVARIANCE ===")
     import numpy as np
-    a, b = Plumiradia(), Plumiradia()
+    a, b = AbyssalForm(QUADRILOBATA), AbyssalForm(QUADRILOBATA)
     pa, pb = PhysiologyModel(), PhysiologyModel()
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 2560, 1600)
     cr = cairo.Context(surf)
@@ -184,7 +204,10 @@ def gate_resize_invariance() -> tuple[bool, list[str]]:
         w = int(rng.integers(120, 2560))
         h = int(rng.integers(100, 1600))
         L = resolve(w, h)
-        vp = Viewport.for_stage(L.stage.x, L.stage.y, L.stage.w, L.stage.h)
+        glass = console.stage_content(L)
+        vp = Viewport.for_stage(glass.x, glass.y, glass.w, glass.h)
+        cm = console.ConsoleModel(species=by_index(0), active=0)
+        light = LightField()
         if L.stage.valid:
             draw_organism(cr, vp, b)
         draw_chrome(cr, L, FAKE, 60.0, 16.6)

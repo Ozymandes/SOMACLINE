@@ -12,7 +12,11 @@ import json  # noqa: E402
 
 SHOTS = [("compact", 460, 380, []), ("instrument", 900, 700, []),
          ("instrument-tall", 760, 620, []), ("archive", 1400, 880, []),
-         ("calibration", 900, 700, ["--calibration"])]
+         ("calibration", 900, 700, ["--calibration"]),
+         ("specimen-2-trispira", 1400, 880, ["--specimen", "1"]),
+         ("specimen-3-pentafida", 1400, 880, ["--specimen", "2"]),
+         ("specimen-4-hexastoma", 1400, 880, ["--specimen", "3"]),
+         ("specimen-5-bifida", 1400, 880, ["--specimen", "4"])]
 
 
 def monitor_rect():

@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 .venv/
 qa-out/
+
+# Hardware generation archive: 2K masters + rejected candidates, ~171MB.
+# Kept on disk (they are the source for tools/build_sprites.py) but out of git.
+# The runtime sprites in assets/sprites/ ARE committed - the app needs them.
+assets/hardware_v2/*/
+!assets/hardware_v2/INVENTORY.md
