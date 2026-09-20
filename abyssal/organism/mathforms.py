@@ -105,7 +105,7 @@ class Body:
     __slots__ = ("time", "core_r", "rng", "seed",
                  "fil_x", "fil_y", "fil_alpha", "fil_width", "fil_tint",
                  "fil_dot", "node_x", "node_y", "node_r", "node_a",
-                 "_nf", "_np", "_nn", "_rate")
+                 "_nf", "_np", "_nn", "_rate", "_ox", "_oy")
 
     #: Species-level identity, mirrored into `species.py`.
     KEY = "body"
@@ -128,14 +128,41 @@ class Body:
         self.node_y = np.zeros(n_node, dtype=np.float64)
         self.node_r = np.zeros(n_node, dtype=np.float64)
         self.node_a = np.zeros(n_node, dtype=np.float64)
+        self._ox = 0.0
+        self._oy = 0.0
         self._build()
         self._shape(Physiology())
+        self._centre()
 
     # -- contract ---------------------------------------------------------
+    def _centre(self) -> None:
+        """Measure the offset that seats this body on the world origin.
+
+        A specimen authored in its own natural frame does not generally have
+        its visual mass at (0, 0) - a single arcuate frond certainly does not -
+        and the viewport centres the WORLD origin, not the creature. Left
+        alone, half the catalogue sits off to one side of its own scope.
+
+        The offset is measured ONCE, from the rest pose, and then held fixed.
+        Re-measuring per frame would make the creature crawl around the field
+        as it moved, which is worse than being off-centre.
+        """
+        m = self.fil_alpha > 0.02
+        if not m.any():
+            return
+        w = self.fil_alpha[m][:, None]
+        self._ox = -float((self.fil_x[m] * w).sum() / (w.sum() * self._np))
+        self._oy = -float((self.fil_y[m] * w).sum() / (w.sum() * self._np))
+
     def update(self, dt: float, p: Physiology) -> None:
         """Advance the clock and re-solve the pose. Allocation-free."""
         self.time += dt * self._rate
         self._shape(p)
+        if self._ox or self._oy:
+            np.add(self.fil_x, self._ox, out=self.fil_x)
+            np.add(self.fil_y, self._oy, out=self.fil_y)
+            np.add(self.node_x, self._ox, out=self.node_x)
+            np.add(self.node_y, self._oy, out=self.node_y)
         _clamp_radius(self.fil_x, self.fil_y)
         _clamp_radius(self.node_x, self.node_y)
 
@@ -895,10 +922,13 @@ class Dyad(Body):
             self.fil_y[i] = oy[a:b]
             seg = (k + 0.5) / ORB
             hot = math.exp(-((seg - (1.0 - min(pk, 1.0))) / 0.18) ** 2) * p.surge
-            self.fil_alpha[i] = min(1.0, 0.52 + 0.40 * hot)
-            self.fil_width[i] = 2.0 + 1.6 * hot
-            self.fil_tint[i] = min(1.0, 0.44 + 0.26 * warm + 0.50 * hot)
-            self.fil_dot[i] = 6.6
+            # The pair is a pair: an orbit that reads as a stray hairline
+            # next to the comb makes the specimen look like one body and a
+            # rendering artefact.
+            self.fil_alpha[i] = min(1.0, 0.74 + 0.26 * hot)
+            self.fil_width[i] = 2.8 + 1.6 * hot
+            self.fil_tint[i] = min(1.0, 0.58 + 0.24 * warm + 0.40 * hot)
+            self.fil_dot[i] = 6.0
 
         # ---- connective filaments -------------------------------------------
         il = i0 + ORB
@@ -913,8 +943,8 @@ class Dyad(Body):
             self.fil_x[i] = ax + (bx - ax) * self.spine_u
             self.fil_y[i] = (ay + (by - ay) * self.spine_u
                              + bow * np.sin(np.pi * self.spine_u))
-            self.fil_alpha[i] = 0.24 + 0.30 * p.flux
-            self.fil_width[i] = 1.3
+            self.fil_alpha[i] = 0.34 + 0.34 * p.flux
+            self.fil_width[i] = 1.5
             self.fil_tint[i] = 0.30 + 0.45 * p.surge
             self.fil_dot[i] = 8.0
 
@@ -923,8 +953,8 @@ class Dyad(Body):
         pick = np.linspace(0, len(ox) - 1, 8).astype(int)
         self.node_x[n0:n0 + 8] = ox[pick]
         self.node_y[n0:n0 + 8] = oy[pick]
-        self.node_r[n0:n0 + 8] = 2.4
-        self.node_a[n0:n0 + 8] = 0.62
+        self.node_r[n0:n0 + 8] = 2.8
+        self.node_a[n0:n0 + 8] = 0.78
 
 
 # ==========================================================================
@@ -958,7 +988,7 @@ class Frond(Body):
     _M = 72                  # barb stations
     _HOOD = 13
     _P = 22
-    _LEN = 448.0
+    _LEN = 412.0
     _POSE = 1.02             # brings the hood to the head, as engraved
 
     def _sizes(self) -> tuple[int, int, int]:
