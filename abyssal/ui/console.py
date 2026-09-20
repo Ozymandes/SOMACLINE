@@ -250,6 +250,10 @@ def _polar_grid(cr, r: Rect, alpha: float = 1.0) -> None:
     cr.restore()
 
 
+#: Under this height the recessed plaque is all bevel; use `_rail` instead.
+_PLAQUE_MIN_H = 56.0
+
+
 def _rail(cr, r: Rect, depth: float = 0.55) -> Rect:
     """A thin machined inset strip, drawn procedurally. Returns its interior.
 
@@ -314,9 +318,16 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField) -> None:
     r = L.header
     if not r.valid:
         return
-    draw_nine(cr, C.PLATE, r.x, r.y, r.w, r.h)
-    cx, cy, cw, ch = C.PLATE.content(r.x, r.y, r.w, r.h)
-    inner = Rect(cx, cy, cw, ch)
+    # Below the plaque's own bevel depth it leaves almost no interior, so a
+    # short header uses the procedural inset strip instead of a miniature
+    # plaque with no room for a name.
+    if r.h >= _PLAQUE_MIN_H:
+        draw_nine(cr, C.PLATE, r.x, r.y, r.w, r.h)
+        cx, cy, cw, ch = C.PLATE.content(r.x, r.y, r.w, r.h)
+        inner = Rect(cx, cy, cw, ch)
+    else:
+        inner = _rail(cr, r)
+        ch = inner.h
     t = L.type
     sp = m.species
 
