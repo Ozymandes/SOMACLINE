@@ -17,6 +17,7 @@ Run:  python3 qa/console_gates.py
 from __future__ import annotations
 
 import math
+import time
 import os
 import sys
 
@@ -30,11 +31,12 @@ from abyssal.core.lighting import MAX_RADIUS, LightField  # noqa: E402
 from abyssal.core.physiology import PhysiologyModel  # noqa: E402
 from abyssal.core.signals import Physiology, Telemetry  # noqa: E402
 from abyssal.core.world import WORLD_RADIUS  # noqa: E402
-from abyssal.organism.form import AbyssalForm, balance_error, max_extent  # noqa: E402
-from abyssal.organism.species import CATALOGUE, by_index  # noqa: E402
+from abyssal.organism.mathforms import max_extent  # noqa: E402
+from abyssal.organism.species import CATALOGUE, by_index, by_key  # noqa: E402
 from abyssal.skin import catalog as C  # noqa: E402
 from abyssal.skin.surface import nine_surface, sprite_size  # noqa: E402
 from abyssal.ui import console  # noqa: E402
+from abyssal.core.layout import _BANK_ASPECT as L_BANK_ASPECT  # noqa: E402
 from abyssal.ui import selector as SEL  # noqa: E402
 
 SIZES = [(420, 340), (520, 420), (700, 560), (900, 700), (1100, 700),
@@ -45,33 +47,98 @@ FAKE = Telemetry(cpu_load=0.4, memory_pressure=0.6, temperature=0.7,
                  mem_total_gb=16.0, temp_c=70.0, temp_label="qa")
 
 
+def _signature(org) -> "np.ndarray":
+    """A pose-independent shape signature: where the body's mass sits.
+
+    A joint histogram over radius and |angle to the vertical|, normalised.
+    Two organisms that differ only in symmetry order - the failure this gate
+    exists to catch - produce nearly identical signatures; two genuinely
+    different body plans do not.
+    """
+    import numpy as np
+    m = org.fil_alpha > 0.02
+    x = org.fil_x[m].ravel()
+    y = org.fil_y[m].ravel()
+    r = np.hypot(x, y) / WORLD_RADIUS
+    a = np.abs(np.arctan2(np.abs(x), y)) / math.pi
+    h, _, _ = np.histogram2d(np.clip(r, 0, 1), a, bins=(8, 6),
+                             range=((0, 1), (0, 1)))
+    tot = h.sum()
+    return h.ravel() / (tot if tot else 1.0)
+
+
 def gate4_species() -> tuple[bool, list[str]]:
+    """The five specimens stay inside the world, stay finite, and stay
+    MORPHOLOGICALLY DISTINCT from one another."""
+    import numpy as np
     print("=== GATE 4 — SPECIES ===")
     bad: list[str] = []
-    print(f"  {'specimen':<24} {'lobes':>5} {'points':>7} {'extent':>8} "
-          f"{'balance':>9}")
+    sigs: dict[str, "np.ndarray"] = {}
+    print(f"  {'specimen':<24} {'fils':>5} {'points':>7} {'extent':>8} "
+          f"{'sim ms':>7}")
     for sp in CATALOGUE:
-        org = AbyssalForm(sp.morph)
-        worst_e = worst_b = 0.0
+        org = sp.build()
+        worst_e = 0.0
+        t0 = time.perf_counter()
         for i in range(400):
             ph = Physiology(agitation=0.5 + 0.5 * math.sin(i * 0.11),
                             pulse=0.5 + 0.5 * math.sin(i * 0.037 + 1.0),
                             density=0.5 + 0.5 * math.sin(i * 0.071 + 2.0),
-                            vitality=1.0 if i % 7 else 0.55)
+                            flux=0.5 + 0.5 * math.sin(i * 0.13),
+                            surge=0.5 + 0.5 * math.sin(i * 0.31))
             if i % 97 == 0:
-                ph = Physiology(1.0, 1.0, 1.0, 1.0)
+                ph = Physiology(1.0, 1.0, 1.0, 1.0, 1.0)
             elif i % 89 == 0:
-                ph = Physiology(0.0, 0.0, 0.0, 0.0)
+                ph = Physiology(0.0, 0.0, 0.0, 0.0, 0.0)
             org.update(1 / 60, ph)
             worst_e = max(worst_e, max_extent(org))
-            worst_b = max(worst_b, balance_error(org))
-        pts = sp.morph.n_fil * sp.morph.n_pts
-        print(f"  {sp.name:<24} {sp.lobes:>5} {pts:>7} "
-              f"{worst_e:>7.1f} {worst_b * 100:>8.4f}%")
+        ms = (time.perf_counter() - t0) / 400 * 1000.0
+        print(f"  {sp.name:<24} {org._nf:>5} {org.n_points:>7} "
+              f"{worst_e:>7.1f} {ms:>6.2f}ms")
         if worst_e > WORLD_RADIUS:
             bad.append(f"{sp.key}: extent {worst_e:.1f} > {WORLD_RADIUS}")
-        if worst_b > 0.02:
-            bad.append(f"{sp.key}: lobe imbalance {worst_b * 100:.3f}% > 2%")
+        if not (np.isfinite(org.fil_x).all() and np.isfinite(org.fil_y).all()
+                and np.isfinite(org.node_x).all()):
+            bad.append(f"{sp.key}: non-finite coordinates")
+        if ms > 1.6:
+            bad.append(f"{sp.key}: sim {ms:.2f}ms/frame is over budget")
+        sigs[sp.key] = _signature(org)
+
+    # Every pair must be clearly different. The previous catalogue was one
+    # solver with the symmetry order changed and would fail this outright.
+    keys = list(sigs)
+    worst = (1e9, "", "")
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            d = float(np.abs(sigs[keys[i]] - sigs[keys[j]]).sum())
+            if d < worst[0]:
+                worst = (d, keys[i], keys[j])
+            if d < 0.35:
+                bad.append(f"{keys[i]} and {keys[j]} are morphologically "
+                           f"near-identical (signature distance {d:.3f})")
+    print(f"  closest pair: {worst[1]} / {worst[2]}  distance {worst[0]:.3f} "
+          f"(floor 0.350)")
+
+    # Symmetra's mirror plane is exact at rest, and only heat may break it.
+    sym = by_key("symmetra")
+    if sym is not None:
+        org = sym.build()
+        for _ in range(120):
+            org.update(1 / 60, Physiology(agitation=0.3, pulse=0.2,
+                                          density=0.6))
+        half = org._nf // 2
+        err = float(np.max(np.abs(org.fil_x[:half] + org.fil_x[half:])))
+        print(f"  symmetra mirror error at rest: {err:.2e} world units")
+        if err > 1e-9:
+            bad.append(f"symmetra mirror plane broken at rest by {err:.3e}")
+        for _ in range(240):
+            org.update(1 / 60, Physiology(agitation=0.9, pulse=1.0,
+                                          density=0.9))
+        hot = float(np.max(np.abs(org.fil_x[:half] + org.fil_x[half:])))
+        print(f"  symmetra mirror error at thermal limit: {hot:.1f} "
+              f"(expected > 0: heat breaks the plane)")
+        if hot <= 1.0:
+            bad.append("symmetra shows no symmetry instability when hot")
     return (not bad), bad
 
 
@@ -127,17 +194,39 @@ def gate6_selector() -> tuple[bool, list[str]]:
     print("\n=== GATE 6 — SELECTOR ===")
     bad: list[str] = []
 
-    # Every state sprite must share one footprint, or a state swap would shift
-    # the key. This is enforced by the build step; assert it independently.
-    sizes = {st: sprite_size(C.selector_cell(st)) for st in C.SELECTOR_STATES}
+    # All ten specimen key plates must share ONE footprint, or pressing a key
+    # would make it jump. Enforced by the build step; asserted independently.
+    sizes = {(i, pl): sprite_size(C.specimen_key(i, pl))
+             for i in range(5) for pl in C.SPECIMEN_KEY_PLATES}
     if all(v[0] for v in sizes.values()):
         uniq = set(sizes.values())
         if len(uniq) != 1:
-            bad.append(f"selector cell footprints differ: {sizes}")
+            bad.append(f"specimen key footprints differ: {sorted(uniq)}")
         else:
-            print(f"  5 state sprites, identical footprint {uniq.pop()}")
+            got = uniq.pop()
+            print(f"  10 specimen key plates, identical footprint {got}")
+            if abs(got[0] / got[1] - SEL.KEY_ASPECT) > 0.002:
+                bad.append(f"KEY_ASPECT {SEL.KEY_ASPECT:.4f} != sprite "
+                           f"{got[0] / got[1]:.4f}")
     else:
-        print("  sprites absent — run tools/build_sprites.py")
+        print("  key sprites absent — run tools/build_sprites.py")
+
+    # layout may not import ui, so it carries the bank aspect as a constant.
+    # If the two drift, every control row is mis-sized. Assert they agree.
+    if abs(L_BANK_ASPECT - SEL.natural_aspect()) > 0.01:
+        bad.append(f"layout._BANK_ASPECT {L_BANK_ASPECT} != "
+                   f"selector.natural_aspect() {SEL.natural_aspect():.3f}")
+
+    # The keys are raster plates: one uniform scale, always.
+    for w, h in SIZES:
+        L = resolve(w, h)
+        if not L.show_controls:
+            continue
+        g, _ = console.control_geometry(L)
+        if g.valid and abs(g.key_w / g.key_h - SEL.KEY_ASPECT) > 0.004:
+            bad.append(f"{w}x{h}: key drawn at aspect "
+                       f"{g.key_w / g.key_h:.4f}, authored "
+                       f"{SEL.KEY_ASPECT:.4f}")
 
     # Drawn geometry == clickable geometry, at every size and every key.
     checked = 0
@@ -154,19 +243,35 @@ def gate6_selector() -> tuple[bool, list[str]]:
             if got != ("key", i):
                 bad.append(f"{w}x{h}: centre of key {i} hit-tests {got}")
             # just outside the bank must not hit a key
-            if SEL.hit(geo, geo.x - 4.0, geo.y + geo.h * 0.5) is not None:
+            if SEL.hit(geo, geo.key_x - 4.0, geo.key_y + geo.key_h * 0.5) is not None:
                 bad.append(f"{w}x{h}: point left of bank hit a key")
             checked += 1
         if mode.valid:
             if console.hit_controls(L, mode.cx, mode.cy) != ("mode", 0):
                 bad.append(f"{w}x{h}: mode key centre does not hit-test")
-        # keys must not overlap and must tile the bank
+        # Keys are evenly pitched and never overlap. They are deliberately
+        # NOT butted: the gap between them is mounting metal, and a click
+        # there must not select a specimen.
         for i in range(geo.n - 1):
-            if abs(geo.key_rect(i).right - geo.key_rect(i + 1).x) > 0.01:
-                bad.append(f"{w}x{h}: gap/overlap between keys {i},{i+1}")
+            d = geo.key_rect(i + 1).x - geo.key_rect(i).x
+            if abs(d - geo.pitch) > 0.01:
+                bad.append(f"{w}x{h}: keys {i},{i+1} pitch {d} != {geo.pitch}")
+            if geo.key_rect(i).right >= geo.key_rect(i + 1).x:
+                bad.append(f"{w}x{h}: keys {i},{i+1} overlap")
+            midgap = (geo.key_rect(i).right + geo.key_rect(i + 1).x) * 0.5
+            if SEL.hit(geo, midgap, geo.key_y + geo.key_h * 0.5) is not None:
+                bad.append(f"{w}x{h}: gap between keys {i},{i+1} hit-tests")
     print(f"  {checked} key centres hit-test to their own index")
 
     # State priority: latched loses to pressed, both lose to disabled.
+    # A pressed or latched key shows the ILLUMINATED plate; everything else
+    # shows the raised one. Nothing is tinted at runtime.
+    for st, want in (("latched", "active"), ("pressed", "active"),
+                     ("idle", "inactive"), ("focus", "inactive"),
+                     ("disabled", "inactive")):
+        if SEL.plate(st) != want:
+            bad.append(f"plate({st}) = {SEL.plate(st)}, want {want}")
+
     cases = [((0, None, None, frozenset()), "latched"),
              ((1, None, None, frozenset()), "idle"),
              ((1, 0, None, frozenset()), "pressed"),
@@ -193,7 +298,7 @@ def gate7_switching() -> tuple[bool, list[str]]:
     light = LightField()
     pm = PhysiologyModel()
 
-    organisms = {i: AbyssalForm(by_index(i).morph, seed=1234 + i)
+    organisms = {i: by_index(i).build(seed=1234 + i)
                  for i in range(len(CATALOGUE))}
     model = console.ConsoleModel(species=by_index(0), active=0)
     clocks = {i: 0.0 for i in organisms}
@@ -249,11 +354,50 @@ def gate7_switching() -> tuple[bool, list[str]]:
     return (not bad), bad
 
 
+def gate8_static_cache() -> tuple[bool, list[str]]:
+    """The cached static hardware layer is pixel-identical to a fresh render.
+
+    A cache that can change what is drawn is a bug generator. This renders a
+    full frame twice at each size - once warm, once with the cache dropped -
+    and asserts the two are byte-identical. The clock is frozen first, because
+    it is the one readout that legitimately differs between two renders.
+    """
+    import numpy as np
+    print("\n=== GATE 8 — STATIC LAYER ===")
+    bad: list[str] = []
+    real_strftime = console.time.strftime
+    console.time.strftime = lambda f, *a: ("1984-07-16" if "%Y" in f
+                                           else "14:27:03")
+    try:
+        sys.path.insert(0, ROOT)
+        from qa import offscreen as off
+
+        def arr(s):
+            s.flush()
+            return np.ndarray(
+                shape=(s.get_height(), s.get_stride() // 4, 4),
+                dtype=np.uint8, buffer=s.get_data()
+            )[:, :s.get_width(), :].copy()
+
+        for w, h in ((900, 700), (1400, 880), (1920, 1080)):
+            warm = arr(off.frame(w, h, 0, 4.0))
+            console.clear_static_cache()
+            fresh = arr(off.frame(w, h, 0, 4.0))
+            d = int(np.abs(warm.astype(int) - fresh.astype(int)).max())
+            print(f"  {w}x{h}: max pixel delta {d}")
+            if d != 0:
+                bad.append(f"{w}x{h}: cached layer differs from fresh by {d}")
+    finally:
+        console.time.strftime = real_strftime
+    return (not bad), bad
+
+
 def main() -> int:
     results = [("GATE 4 species", *gate4_species()),
                ("GATE 5 skin", *gate5_skin()),
                ("GATE 6 selector", *gate6_selector()),
-               ("GATE 7 switching", *gate7_switching())]
+               ("GATE 7 switching", *gate7_switching()),
+               ("GATE 8 static layer", *gate8_static_cache())]
     print("\n=== SUMMARY ===")
     ok = True
     for name, passed, problems in results:

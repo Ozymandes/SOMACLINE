@@ -1,20 +1,25 @@
-"""The Abyssal specimen catalogue.
+"""The Abyssal specimen catalogue: five mathematical organisms.
 
-Five specimens of one family. Every entry pairs a `Morphology` (what it looks
-like and how it moves) with the archive metadata the instrument displays.
+Each entry pairs one BODY PLAN from `mathforms` with the archive metadata the
+instrument displays and the key plate the selector engraves.
 
-All five share the suffix -RADIA: a radial body plan with a luminous core, N
-identical lobes, a rachis per lobe and paired filaments along it. They differ
-in symmetry order, filament economy and motion temperament, not in kind.
+These are five genuinely different organisms, not one solver with its symmetry
+order changed. Their taxonomy follows their actual morphology - a ciliated
+ribbon is not a radial plume and is not named as though it were - and the
+archive codes, class and origin shown on the footer rail and the selector
+ledge come from here, so the machine can never describe a specimen it is not
+drawing.
 
 BEHAVIOURAL MAPPING
 -------------------
-Every specimen is driven by the same three physiological channels, so live
-machine state reads consistently across the catalogue:
+All five are driven by the same four physiological channels, so live machine
+state reads consistently across the catalogue - but each maps them onto its
+own morphology rather than onto a shared animation speed:
 
-    agitation  <- CPU load          filament motion energy
-    pulse      <- temperature       breathing rate and radial expansion
-    density    <- memory pressure   how many filaments are lit
+    agitation  <- CPU load        motion energy
+    pulse      <- temperature     metabolic contraction, thermal stress
+    density    <- memory          how much body is expressed
+    flux/surge <- I/O + network   peripheral excitation and propagating events
 
 `response` records where each specimen is most legible, which is what makes
 switching feel informative rather than decorative.
@@ -23,101 +28,113 @@ switching feel informative rather than decorative.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
-from . import morphology as M
-from .morphology import Morphology
+from . import mathforms as MF
+from .mathforms import Body
 
 
 @dataclass(frozen=True, slots=True)
 class Species:
-    key: str                 # stable identifier
-    name: str                # binomial, shown as the specimen name
-    epithet: str             # vernacular name
-    archive: str             # archive code
-    cls: str                 # class
-    origin: str              # origin
-    short: str               # engraved on the selector key
-    morphology: str          # morphology word for the observation field
-    symmetry: str            # symmetry description
-    notes: str               # short archive note
-    response: str            # behavioural mapping summary
-    morph: Morphology
+    key: str                     # stable identifier
+    name: str                    # binomial, shown as the specimen name
+    epithet: str                 # vernacular name
+    archive: str                 # archive code
+    cls: str                     # class
+    origin: str                  # origin
+    short: str                   # engraved abbreviation
+    morphology: str              # morphology word for the observation field
+    symmetry: str                # symmetry description
+    plan: str                    # body-plan word, shown in the field heading
+    notes: str                   # short archive note
+    response: str                # behavioural mapping summary
+    factory: Callable[..., Body]
+
+    def build(self, seed: int = 20260920) -> Body:
+        """Construct this specimen's organism. Allocates; call once per key."""
+        return self.factory(seed=seed)
 
     @property
-    def lobes(self) -> int:
-        return self.morph.n_lobe
+    def symmetry_short(self) -> str:
+        """The symmetry as the observation field states it."""
+        return self.plan
 
 
 CATALOGUE: tuple[Species, ...] = (
     Species(
-        key="quadrilobata",
-        morphology="QUADRILOBATE",
-        short="QUADRI",
-        name="PLUMIRADIA QUADRILOBATA",
-        epithet="THE QUARTERED PLUME",
+        key="ciliaribbon",
+        name="CILIARADIA SIGMATA",
+        epithet="THE SIGMOID RIBBON",
         archive="AQS-0042",
-        cls="MATHEMATICAL ORGANISM",
+        cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        symmetry="QUADRILATERAL",
-        notes="PLUME MORPHOLOGY",
-        response="BROAD VANES; LOAD READS AS SWAY",
-        morph=M.QUADRILOBATA,
+        short="SIGMA",
+        morphology="CILIATE RIBBON",
+        symmetry="BILATERAL / CURVILINEAR",
+        plan="AXIAL",
+        notes="METACHRONAL CILIATION",
+        response="LOAD READS AS BEAT FREQUENCY",
+        factory=MF.Ciliaribbon,
     ),
     Species(
-        key="trispira",
-        morphology="HELICATE",
-        short="TRISPIRA",
-        name="HELICORADIA TRISPIRA",
-        epithet="THE SPIRALLED TRINE",
+        key="funnelis",
+        name="INFUNDIBULA COLONIALIS",
+        epithet="THE THREEFOLD BELL",
         archive="AQS-0117",
-        cls="MATHEMATICAL ORGANISM",
+        cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        symmetry="TRILATERAL",
-        notes="HELICAL TORSION",
-        response="CURL DEEPENS UNDER LOAD",
-        morph=M.TRISPIRA,
+        short="BELL",
+        morphology="INFUNDIBULATE",
+        symmetry="COLONIAL / ACENTRIC",
+        plan="COLONIAL",
+        notes="RULED CONIC SURFACES",
+        response="THERMAL READS AS APERTURE",
+        factory=MF.Funnelis,
     ),
     Species(
-        key="pentafida",
-        morphology="CILIATE",
-        short="PENTA",
-        name="CILIARADIA PENTAFIDA",
-        epithet="THE FIVEFOLD CILIUM",
+        key="symmetra",
+        name="SYMMETRA ROSTRATA",
+        epithet="THE MIRRORED ROSTRUM",
         archive="AQS-0233",
-        cls="MATHEMATICAL ORGANISM",
+        cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        symmetry="PENTARADIAL",
-        notes="DENSE CILIATION",
-        response="MEMORY READS AS FILAMENT COUNT",
-        morph=M.PENTAFIDA,
+        short="ROSTRA",
+        morphology="ROSTRATE",
+        symmetry="SAGITTAL MIRROR",
+        plan="MIRROR",
+        notes="EXACT REFLECTION PLANE",
+        response="HEAT BREAKS THE MIRROR PLANE",
+        factory=MF.Symmetra,
     ),
     Species(
-        key="hexastoma",
-        morphology="UMBELLATE",
-        short="HEXA",
-        name="UMBELLIRADIA HEXASTOMA",
-        epithet="THE HEXATE UMBEL",
+        key="dyad",
+        name="DYADIS CONIUGATA",
+        epithet="THE COUPLED PAIR",
         archive="AQS-0308",
-        cls="MATHEMATICAL ORGANISM",
+        cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        symmetry="HEXARADIAL",
-        notes="UMBELLATE CANOPY",
-        response="THERMAL READS AS CANOPY BREATH",
-        morph=M.HEXASTOMA,
+        short="DYAD",
+        morphology="DIPLOSOMATIC",
+        symmetry="PAIRED / ASYMMETRIC",
+        plan="PAIRED",
+        notes="COMB AND ORBIT, COUPLED",
+        response="I/O READS AS A TRAVELLING PACKET",
+        factory=MF.Dyad,
     ),
     Species(
-        key="bifida",
-        morphology="FLAGELLATE",
-        short="BIFIDA",
-        name="VIBRISSARADIA BIFIDA",
-        epithet="THE CLEFT VIBRISSA",
+        key="frond",
+        name="PLUMIRADIA FALCATA",
+        epithet="THE HOODED FROND",
         archive="AQS-0451",
-        cls="MATHEMATICAL ORGANISM",
+        cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        symmetry="BILATERAL",
-        notes="SPARSE FLAGELLATION",
+        short="FROND",
+        morphology="FALCATE PLUME",
+        symmetry="BILATERAL / ARCUATE",
+        plan="ARCUATE",
+        notes="SINGLE ARCUATE RACHIS",
         response="HIGHEST MOTION SENSITIVITY",
-        morph=M.BIFIDA,
+        factory=MF.Frond,
     ),
 )
 

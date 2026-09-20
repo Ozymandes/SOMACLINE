@@ -79,6 +79,19 @@ def lamp(size: str, state: str) -> str:
 
 SELECTOR_STATES = ("idle", "focus", "pressed", "latched", "disabled")
 
+#: The canonical specimen keys: one bespoke engraved plate per organism, in a
+#: raised/unlit and a seated/illuminated state. These supersede the generic
+#: keycap family; `selector/cell_*` and `selector/bank_empty` remain built but
+#: are no longer the specimen control (see docs/ARCHITECTURE.md).
+SPECIMEN_KEY_PLATES = ("inactive", "active")
+
+
+def specimen_key(index: int, plate: str) -> str:
+    """Sprite name for specimen `index` (0-based) in `plate` state."""
+    if plate not in SPECIMEN_KEY_PLATES:
+        plate = "inactive"
+    return f"specimen/key_{index % 5 + 1:02d}_{plate}"
+
 
 def selector_cell(state: str) -> str:
     if state not in SELECTOR_STATES:

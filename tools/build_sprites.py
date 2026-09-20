@@ -269,6 +269,72 @@ def build_selector() -> None:
     _save(emp.crop((ex0, ey0, ex1, ey1)), "selector/bank_empty.png", 1280)
 
 
+def build_creature_keys() -> None:
+    """Slice the canonical specimen key sheet: 5 creatures x 2 states.
+
+    The sheet is a 5 x 2 grid of engraved console keys - one per mathematical
+    organism, top row raised/unlit, bottom row seated/illuminated. It is the
+    authoritative identity of the five specimens, so nothing here reinterprets
+    it: the cells are located from the ALPHA CHANNEL, cropped to their own ink,
+    and normalised onto one shared canvas.
+
+    Why the normalisation matters here more than anywhere else: the generator
+    drew the ten keys between 488 and 500 px wide. Blitting them at their own
+    sizes would make a key visibly grow or shift the instant it was pressed.
+    `_uniform_cells` puts every state on one canvas with one scale factor, so
+    swapping inactive for active is a pure pixel substitution at a fixed rect -
+    which is also what lets hit testing and drawing share one geometry.
+
+    Alpha: the source carries genuine per-pixel alpha (verified: zero outside
+    the keys, a soft ramp on the rounded edges, no matte). It is dithered to
+    250-254 on the body and 0-2 on the ground, exactly like the rest of the
+    library, so the same contrast stretch is applied - background to fully
+    clear, body to fully opaque, antialiased edge ramp preserved.
+    """
+    print("specimen keys:")
+    im = _load("selector/creature_keys_2k.png")
+    a = _alpha(im)
+
+    rows = _row_runs(a, min_h=int(im.height * 0.10))
+    if len(rows) != 2:
+        raise SystemExit(f"expected 2 key rows, found {len(rows)}")
+    states = ["inactive", "active"]
+
+    # Locate the five columns from the FIRST row and reuse those bounds for
+    # both, so a key and its lit twin are cut from the same column of the
+    # sheet even if the glow makes the lit row's ink a few pixels wider.
+    band0 = im.crop((0, rows[0][0], im.width, rows[0][1]))
+    cols = _col_runs(_alpha(band0), min_w=int(im.width * 0.04))
+    if len(cols) != 5:
+        raise SystemExit(f"expected 5 key columns, found {len(cols)}")
+
+    cells: list[Image.Image] = []
+    for ry0, ry1 in rows:
+        band = im.crop((0, ry0, im.width, ry1))
+        for cx0, cx1 in cols:
+            cells.append(_norm_alpha(band.crop((cx0, 0, cx1, band.height))))
+
+    out = _uniform_cells(cells, 256)
+    for i, cell in enumerate(out):
+        state = states[i // 5]
+        _save(cell, f"specimen/key_{i % 5 + 1:02d}_{state}.png")
+
+
+def _norm_alpha(im: Image.Image, lo: int = 8, hi: int = 248) -> Image.Image:
+    """Contrast-stretch a dithered alpha channel to a clean one.
+
+    Below `lo` becomes fully transparent and above `hi` fully opaque; the band
+    between is rescaled, which PRESERVES the antialiased edge ramp instead of
+    hard-thresholding it into a jagged cut-out. This is the same normalisation
+    the rest of assets/hardware_v2 received.
+    """
+    arr = np.array(im, dtype=np.float32)
+    al = arr[..., 3]
+    al = np.clip((al - lo) * (255.0 / max(1.0, hi - lo)), 0.0, 255.0)
+    arr[..., 3] = al
+    return Image.fromarray(arr.astype(np.uint8), "RGBA")
+
+
 def build_state_strip(src: str, out_dir: str, names: list[str], width: int) -> None:
     im = _load(src)
     cols = _col_runs(_alpha(im), min_w=int(im.width * 0.03))
@@ -333,6 +399,7 @@ def main() -> int:
     build_annunciators()
     build_parts()
     build_selector()
+    build_creature_keys()
     build_controls()
     total = sum(p.stat().st_size for p in OUT.rglob("*.png"))
     n = len(list(OUT.rglob("*.png")))

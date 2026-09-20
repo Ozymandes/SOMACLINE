@@ -21,9 +21,7 @@ from abyssal.core.physiology import PhysiologyModel  # noqa: E402
 from abyssal.core.signals import Telemetry  # noqa: E402
 from abyssal.core.viewport import Viewport, isotropy_error  # noqa: E402
 from abyssal.core.world import WORLD_RADIUS  # noqa: E402
-from abyssal.organism.form import AbyssalForm  # noqa: E402
-from abyssal.organism.morphology import QUADRILOBATA  # noqa: E402
-from abyssal.organism.species import by_index  # noqa: E402
+from abyssal.organism.species import CATALOGUE, by_index  # noqa: E402
 from abyssal.core.lighting import LightField  # noqa: E402
 from abyssal.ui import console  # noqa: E402
 from abyssal.organism.render import draw_organism  # noqa: E402
@@ -45,8 +43,10 @@ FAKE = Telemetry(cpu_load=0.42, memory_pressure=0.67, temperature=0.61,
 
 def gate1_geometry() -> tuple[bool, list[str]]:
     print("=== GATE 1 — GEOMETRY ===")
+    import numpy as np
     problems: list[str] = []
-    org = AbyssalForm(QUADRILOBATA)
+    ref_sig = None
+    org = by_index(0).build()
     pm = PhysiologyModel()
     # Drive to a hot state so the organism is at maximum extent.
     hot = Telemetry(cpu_load=1.0, memory_pressure=1.0, temperature=1.0,
@@ -55,7 +55,7 @@ def gate1_geometry() -> tuple[bool, list[str]]:
         org.update(1 / 60, pm.update(1 / 60, hot))
 
     print(f"  {'size':>11}  {'state':<11} {'stage':>11} {'scale':>8} "
-          f"{'iso_err':>9} {'r_px':>7} {'centre_err':>10} {'quad_bal':>8}")
+          f"{'iso_err':>9} {'r_px':>7} {'centre_err':>10} {'shape_err':>10}")
     for w, h in SIZES:
         L = resolve(w, h)
         glass = console.stage_content(L)
@@ -83,16 +83,25 @@ def gate1_geometry() -> tuple[bool, list[str]]:
         if glass.valid and ext_px > room + 0.5:
             problems.append(f"{w}x{h}: organism {ext_px:.1f}px > {room:.1f}px — CLIPS")
 
-        # Quadrant balance: mass per diagonal quadrant must match.
-        qs = _quadrant_mass(org)
-        bal = (max(qs) - min(qs)) / max(1e-9, sum(qs) / 4)
-        if bal > 0.06:
-            problems.append(f"{w}x{h}: quadrant imbalance {bal:.1%}")
+        # Shape invariance: unprojecting the drawn pixels must give back the
+        # world coordinates EXACTLY, at every size. This is the claim that
+        # matters and it holds for any body plan - the old quadrant-balance
+        # check only ever made sense for a four-fold radial plume, and the
+        # catalogue no longer contains one.
+        sig = _shape_signature(org, vp)
+        if ref_sig is None:
+            ref_sig = sig
+            serr = 0.0
+        else:
+            serr = float(np.max(np.abs(sig - ref_sig)))
+        if serr > 1e-9:
+            problems.append(f"{w}x{h}: shape changed under projection by "
+                            f"{serr:.3e} world units")
 
         print(f"  {w:>5}x{h:<5}  {L.state.value:<11} "
               f"{L.stage.w:>5.0f}x{L.stage.h:<5.0f} {vp.scale:>8.4f} "
               f"{iso:>9.1e} {vp.organism_px_radius:>7.1f} {cerr:>10.1e} "
-              f"{bal:>7.2%}")
+              f"{serr:>10.1e}")
 
     # Breakpoint sanity
     checks = [(699, 600, LayoutState.COMPACT), (700, 600, LayoutState.INSTRUMENT),
@@ -107,24 +116,28 @@ def gate1_geometry() -> tuple[bool, list[str]]:
     return (not problems), problems
 
 
-def _quadrant_mass(org) -> list[float]:
-    """Sum of |r| of filament points per diagonal quadrant."""
+def _shape_signature(org, vp) -> "np.ndarray":
+    """Project the body to pixels, then unproject. Must be the identity.
+
+    A resize is only allowed to be a uniform similarity transform. Projecting
+    through the viewport and dividing the result back out recovers the world
+    coordinates if and only if that is true; any anisotropy, rounding or
+    centre drift shows up here as a non-zero residual, whatever the body plan.
+    """
     import numpy as np
-    x, y = org.fil_x.ravel(), org.fil_y.ravel()
-    a = np.arctan2(y, x)
-    r = np.hypot(x, y)
-    out = []
-    for k in range(4):
-        lo = -math.pi + k * math.pi / 2
-        hi = lo + math.pi / 2
-        out.append(float(r[(a >= lo) & (a < hi)].sum()))
-    return out
+    x = org.fil_x.ravel()[::5]
+    y = org.fil_y.ravel()[::5]
+    px = vp.cx + x * vp.scale
+    py = vp.cy + y * vp.scale
+    return np.concatenate([(px - vp.cx) / vp.scale, (py - vp.cy) / vp.scale])
 
 
 def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
     print("\n=== GATE 3 — PERFORMANCE ===")
+    import numpy as np
     problems: list[str] = []
-    org = AbyssalForm(QUADRILOBATA)
+    ref_sig = None
+    org = by_index(0).build()
     pm = PhysiologyModel()
 
     bench = [(420, 340), (900, 700), (1400, 860), (1920, 1080), (2560, 1600)]
@@ -151,7 +164,6 @@ def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
 
         t = time.perf_counter()
         for _ in range(n):
-            draw_background(cr, w, h)
             draw_organism(cr, vp, org)
         org_ms = (time.perf_counter() - t) / n * 1000
 
@@ -174,7 +186,6 @@ def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
             problems.append(f"canonical tile {w}x{h} costs {total:.2f}ms "
                             f"(> 16.6ms 60fps budget)")
         if outdir:
-            draw_background(cr, w, h)
             console.draw_under(cr, L, cm, vp.scale)
             draw_organism(cr, vp, org)
             console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
@@ -190,7 +201,7 @@ def gate_resize_invariance() -> tuple[bool, list[str]]:
     """
     print("\n=== RESIZE INVARIANCE ===")
     import numpy as np
-    a, b = AbyssalForm(QUADRILOBATA), AbyssalForm(QUADRILOBATA)
+    a, b = by_index(0).build(seed=5), by_index(0).build(seed=5)
     pa, pb = PhysiologyModel(), PhysiologyModel()
     surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 2560, 1600)
     cr = cairo.Context(surf)

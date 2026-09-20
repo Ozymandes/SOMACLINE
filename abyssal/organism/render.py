@@ -1,4 +1,4 @@
-"""Cairo rendering of Plumiradia. The only module that turns world -> pixels.
+"""Cairo rendering of the specimen. The only module that turns world -> pixels.
 
 NO cairo transform is ever set. Every coordinate is pushed through
 Viewport.px() / Viewport.length(), which are uniform by construction, so a
@@ -8,13 +8,15 @@ any window size or aspect ratio. Nothing here mutates the organism.
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import cairo
 import numpy as np
 
 from ..core.theme import CYAN, CYAN_DEEP, LIME, SILVER
 from ..core.viewport import Viewport
 from ..core.world import WORLD_RADIUS
-from .plumiradia import Plumiradia
+from .mathforms import Body, max_extent
 
 # Pixel floors / ceilings so the specimen survives both a postage stamp and a
 # 4K stage without turning into either invisible hairlines or fat blobs.
@@ -24,12 +26,26 @@ MIN_NODE_PX = 0.55
 MAX_NODE_PX = 3.4
 ALPHA_CULL = 0.015
 
+#: Below this drawn pitch a dotted filament is stroked solid instead: the dots
+#: would be closer together than the line is wide, so the dash costs work and
+#: changes nothing visible.
+MIN_DOT_PITCH_PX = 2.6
+MIN_DOT_GAP_PX = 0.85
+
 _WASH_R = 430.0
 
 # Reusable scratch, keyed by array shape. Renderer-side only; the organism
 # never learns that pixels exist.
 _SCRATCH: dict = {}
-_GRADIENT_KEY: list = [None, None]
+
+#: The deep-field wash, cached as a rendered disc per quantised radius.
+#: Filling a 900px radial gradient was 6.5ms - by a wide margin the most
+#: expensive single operation in the frame - and its radius changes only on
+#: resize. Rasterising it once and blitting the result is the same pixels for
+#: a twentieth of the cost. Bounded, and derived pixels only.
+_WASH_STEP = 6.0
+_WASH_LIMIT = 6
+_WASH: "OrderedDict[int, cairo.ImageSurface]" = OrderedDict()
 
 _CD_R, _CD_G, _CD_B = CYAN_DEEP
 _C_R, _C_G, _C_B = CYAN
@@ -45,24 +61,39 @@ def _scratch(shape):
     return buf
 
 
-def _wash_gradient(vp: Viewport):
-    """Radial deep-field wash. Cached until the viewport actually changes."""
-    key = (vp.cx, vp.cy, vp.scale)
-    if _GRADIENT_KEY[0] != key:
-        r = vp.length(_WASH_R)
-        g = cairo.RadialGradient(vp.cx, vp.cy, 0.0, vp.cx, vp.cy, max(r, 1.0))
-        g.add_color_stop_rgba(0.00, _CD_R, _CD_G, _CD_B, 0.070)
-        g.add_color_stop_rgba(0.18, _CD_R, _CD_G, _CD_B, 0.048)
-        g.add_color_stop_rgba(0.45, _CD_R, _CD_G, _CD_B, 0.024)
-        g.add_color_stop_rgba(0.70, _CD_R, _CD_G, _CD_B, 0.010)
-        g.add_color_stop_rgba(0.87, _CD_R, _CD_G, _CD_B, 0.003)
-        g.add_color_stop_rgba(1.00, _CD_R, _CD_G, _CD_B, 0.000)
-        _GRADIENT_KEY[0] = key
-        _GRADIENT_KEY[1] = g
-    return _GRADIENT_KEY[1]
+def _wash_disc(radius: float) -> tuple[cairo.ImageSurface, int] | None:
+    """The deep-field wash rendered to a disc, cached per quantised radius."""
+    q = max(1, int(round(radius / _WASH_STEP)))
+    hit = _WASH.get(q)
+    if hit is not None:
+        _WASH.move_to_end(q)
+        return hit
+    r = q * _WASH_STEP
+    side = int(r * 2.0) + 2
+    if side < 2 or side > 8192:
+        return None
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, side, side)
+    c = cairo.Context(surf)
+    mid = side * 0.5
+    g = cairo.RadialGradient(mid, mid, 0.0, mid, mid, max(r, 1.0))
+    g.add_color_stop_rgba(0.00, _CD_R, _CD_G, _CD_B, 0.070)
+    g.add_color_stop_rgba(0.18, _CD_R, _CD_G, _CD_B, 0.048)
+    g.add_color_stop_rgba(0.45, _CD_R, _CD_G, _CD_B, 0.024)
+    g.add_color_stop_rgba(0.70, _CD_R, _CD_G, _CD_B, 0.010)
+    g.add_color_stop_rgba(0.87, _CD_R, _CD_G, _CD_B, 0.003)
+    g.add_color_stop_rgba(1.00, _CD_R, _CD_G, _CD_B, 0.000)
+    c.set_source(g)
+    c.arc(mid, mid, r, 0.0, 6.283185307179586)
+    c.fill()
+    surf.flush()
+    ent = (surf, side)
+    _WASH[q] = ent
+    while len(_WASH) > _WASH_LIMIT:
+        _WASH.popitem(last=False)
+    return ent
 
 
-def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
+def draw_organism(cr, vp: Viewport, org: Body) -> None:
     """Draw one frame of the specimen. Caller has already painted the field."""
     scale = vp.scale
     cx = vp.cx
@@ -78,11 +109,12 @@ def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
     cr.set_antialias(cairo.ANTIALIAS_FAST)
 
     # ---- 1. deep-field wash ------------------------------------------------
-    wr = vp.length(_WASH_R)
-    cr.set_source(_wash_gradient(vp))
-    cr.new_path()
-    cr.arc(cx, cy, wr, 0.0, 6.283185307179586)
-    cr.fill()
+    wash = _wash_disc(vp.length(_WASH_R))
+    if wash is not None:
+        disc, side = wash
+        cr.set_source_surface(disc, round(cx - side * 0.5),
+                              round(cy - side * 0.5))
+        cr.paint()
 
     # ---- 2. filaments, back to front by alpha ------------------------------
     px, py = _scratch(org.fil_x.shape)
@@ -98,6 +130,7 @@ def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
     a_l = alpha.tolist()
     w_l = org.fil_width.tolist()
     t_l = org.fil_tint.tolist()
+    d_l = org.fil_dot.tolist()
 
     move_to = cr.move_to
     line_to = cr.line_to
@@ -107,6 +140,8 @@ def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
     cd_r, cd_g, cd_b = _CD_R, _CD_G, _CD_B
     dr, dg, db = _DR, _DG, _DB
 
+    set_dash = cr.set_dash
+    dashed = False
     for i in order:
         a = a_l[i]
         if a < ALPHA_CULL:
@@ -119,12 +154,29 @@ def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
         elif lw > MAX_STROKE_PX:
             lw = MAX_STROKE_PX
         set_lw(lw)
+        # The references are drawn as sequences of DOTS, not continuous ink.
+        # A dash pattern reproduces that for the cost of one call, where one
+        # filament per dot would multiply the path count by twenty. Below the
+        # pitch at which dots would merge into a line anyway, the filament is
+        # simply stroked solid - which is also what keeps a tiny stage cheap.
+        pitch = d_l[i] * scale
+        if pitch >= MIN_DOT_PITCH_PX:
+            gap = pitch - lw
+            if gap < MIN_DOT_GAP_PX:
+                gap = MIN_DOT_GAP_PX
+            set_dash([lw * 0.95, gap], 0.0)
+            dashed = True
+        elif dashed:
+            set_dash([], 0.0)
+            dashed = False
         rx = xs[i]
         ry = ys[i]
         move_to(rx[0], ry[0])
         for j in range(1, len(rx)):
             line_to(rx[j], ry[j])
         stroke()
+    if dashed:
+        set_dash([], 0.0)
 
     # ---- 3. luminous construction nodes ------------------------------------
     nx = org.node_x
@@ -163,6 +215,12 @@ def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
         fill()
 
     # ---- 4. core -----------------------------------------------------------
+    # Not every specimen has one. A body whose structure IS its centre - the
+    # comb, the frond, the mirrored rostrum - would be falsified by a glowing
+    # bead at the world origin, so a zero radius draws nothing at all.
+    if org.core_r <= 0.0:
+        cr.set_antialias(prev_aa)
+        return
     core = vp.length(org.core_r)
     if core < 1.5:
         core = 1.5
@@ -200,7 +258,7 @@ def draw_organism(cr, vp: Viewport, org: Plumiradia) -> None:
 
     cr.set_antialias(prev_aa)
 
-def draw_calibration(cr, vp: Viewport, org: Plumiradia) -> None:
+def draw_calibration(cr, vp: Viewport, org: Body) -> None:
     """DEBUG overlay -- GATE 1 circularity check.
 
     World circles at WORLD_RADIUS and r=250, a crosshair through the world
@@ -249,7 +307,6 @@ def draw_calibration(cr, vp: Viewport, org: Plumiradia) -> None:
 
     # current actual extent, so drift is visible against the design radius
     try:
-        from .plumiradia import max_extent
         e = max_extent(org)
     except Exception:
         e = 0.0

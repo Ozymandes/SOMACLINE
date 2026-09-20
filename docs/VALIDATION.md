@@ -139,3 +139,78 @@ large sizes** — see Known limitations.
    already passed and it is not needed to prove the foundation.
 6. Single organism, single specimen, no persistence, no settings — deliberate
    POC scope.
+
+---
+
+# Visual-integration pass — measured results
+
+Machine: Omarchy / Hyprland 0.56, eDP-1 1600x1000 logical at scale 1.6.
+
+## Gates
+
+```
+GATE 1 geometry        PASS   20 sizes, iso_err < 2e-13 px, centre_err 0,
+                              shape residual < 9e-13 world units
+GATE 3 performance     PASS   every benched size inside the 16.6 ms budget
+resize invariance      PASS   400 frames, |dx| = |dy| = 0
+GATE 4 species         PASS   5 specimens, extent within world radius,
+                              closest morphological pair 0.665 (floor 0.350)
+GATE 5 skin            PASS   6 panels x 6 sizes, content always inside
+GATE 6 selector        PASS   10 key plates, identical 256x267 footprint,
+                              50 key centres hit-test to their own index,
+                              gaps between keys reject
+GATE 7 switching       PASS   120 switches, no clock rewound
+GATE 8 static layer    PASS   warm vs cold render, max pixel delta 0
+```
+
+## Frame cost
+
+Headless, full frame (simulation + organism + console), before and after the
+caching work in this pass:
+
+| surface | sim | organism | console | total | cap |
+|---|---|---|---|---|---|
+| 420x340 | 0.49 | 1.27 | 1.69 | **3.45 ms** | 290 fps |
+| 900x700 | 0.49 | 1.74 | 3.20 | **5.43 ms** | 184 fps |
+| 1400x860 | 0.49 | 2.30 | 4.07 | **6.85 ms** | 146 fps |
+| 1920x1080 | 0.49 | 3.07 | 5.55 | **9.11 ms** | 110 fps |
+| 2560x1600 | 0.49 | 4.98 | 7.42 | **12.89 ms** | 78 fps |
+
+Every size is now inside the 60 fps budget; at the start of the pass only the
+two smallest were.
+
+## In the real application
+
+Measured from the app's own probe log, so these include GTK and the frame
+clock:
+
+| window | surface | our draw | our sim | presented |
+|---|---|---|---|---|
+| 781x468 tiled | 1250x750 | — | — | **78–80 fps** |
+| 1400x880 floated | 2151x1352 | 3.3 ms | 1.3 ms | 30 fps |
+| 1576x950 tiled | 2521x1520 | 3.4 ms | 1.3 ms | 26 fps |
+
+The canonical tile runs well above target. At large sizes the application
+uses **4.6 ms of its 16.6 ms budget** and the presented rate is bounded
+elsewhere: a ~15 MB CPU-rendered surface has to reach the compositor every
+frame, and Hyprland settles on half-rate presentation for it. Changing
+renderer (`GSK_RENDERER=cairo|gl|ngl`) moves this by 1–3 fps, which is what
+identifies it as presentation rather than drawing.
+
+The FRAME / RENDER module reports that honestly rather than flattering it —
+it is showing the real presented rate, which is the point of the readout.
+
+## Alpha verification
+
+All 65 runtime sprites re-checked pixel-wise. The ten specimen keys:
+`alpha.min() == 0`, corner alpha 0, 2.3–3.5% partially transparent edge
+pixels, no matte, identical footprint. Full audit in
+`assets/hardware_v2/INVENTORY.md`.
+
+## Asset usage
+
+51 of 65 sprites referenced. Every unused asset is accounted for in the
+inventory audit, including the two deliberate omissions — the telemetry rack
+(duplicates the module shell's own mounting and would cost ~20% of the graph
+width) and the chassis master (a fixed composition that cannot follow an
+arbitrary window aspect).

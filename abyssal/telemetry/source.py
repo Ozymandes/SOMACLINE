@@ -16,6 +16,12 @@ import os
 
 from abyssal.core.signals import Telemetry
 
+#: Throughput that reads as "fully busy", in bytes/second. Deliberately low:
+#: this channel drives a peripheral-event response on the organism, and what
+#: matters is that ordinary desktop activity is visible at all, not that a
+#: sustained NVMe flood pins it.
+_IO_FULL_SCALE = 40.0e6
+
 # Temperature normalisation range (Celsius).
 _TEMP_LO = 30.0
 _TEMP_HI = 95.0
@@ -156,6 +162,11 @@ class TelemetrySource:
         self._last_temp = 0.0
         self._last_temp_c: float | None = None
 
+        self._prev_io: tuple[float, int, int] | None = None
+        self._last_io_rate = 0.0
+        self._last_io_mb = 0.0
+        self._last_net_mb = 0.0
+
         self._mem_total_kb: int | None = None
         try:
             mem_total = _read_int_from_meminfo_line("MemTotal")
@@ -174,6 +185,64 @@ class TelemetrySource:
 
         self._sensor: _SensorRef | None = sensor_ref
         self._notes = f"cpu=/proc/stat mem=/proc/meminfo {sensor_note}"
+
+    # -- block I/O and network -----------------------------------------
+    def _sample_io(self) -> tuple[float, bool, float, float]:
+        """Combined block + network throughput, normalised.
+
+        Both counters are monotonic totals, so a rate needs two samples; the
+        first call therefore reports nothing rather than a spike. Any failure
+        degrades to "unavailable" and the organism simply keeps its idle
+        peripheral behaviour.
+        """
+        import time as _time
+        now = _time.monotonic()
+        blk = 0
+        try:
+            with open("/proc/diskstats", "r") as f:
+                for line in f:
+                    p = line.split()
+                    if len(p) < 10:
+                        continue
+                    name = p[2]
+                    # Whole devices only: partitions would double count.
+                    if name.startswith(("loop", "ram", "zram", "dm-")):
+                        continue
+                    if name[-1].isdigit() and not name.startswith("nvme"):
+                        continue
+                    if name.startswith("nvme") and "p" in name:
+                        continue
+                    blk += (int(p[5]) + int(p[9])) * 512
+        except Exception:
+            return (self._last_io_rate, False, self._last_io_mb,
+                    self._last_net_mb)
+        net = 0
+        try:
+            with open("/proc/net/dev", "r") as f:
+                for line in f.readlines()[2:]:
+                    iface, _, rest = line.partition(":")
+                    if iface.strip() == "lo":
+                        continue
+                    p = rest.split()
+                    net += int(p[0]) + int(p[8])
+        except Exception:
+            net = 0
+
+        prev = self._prev_io
+        self._prev_io = (now, blk, net)
+        if prev is None:
+            return (0.0, False, 0.0, 0.0)
+        dt = now - prev[0]
+        if dt <= 0.0:
+            return (self._last_io_rate, True, self._last_io_mb,
+                    self._last_net_mb)
+        d_blk = max(0, blk - prev[1]) / dt
+        d_net = max(0, net - prev[2]) / dt
+        rate = min(1.0, (d_blk + d_net) / _IO_FULL_SCALE)
+        self._last_io_rate = rate
+        self._last_io_mb = d_blk / 1e6
+        self._last_net_mb = d_net / 1e6
+        return (rate, True, self._last_io_mb, self._last_net_mb)
 
     # -- CPU -----------------------------------------------------------
 
@@ -303,6 +372,11 @@ class TelemetrySource:
             temperature, temp_available, temp_c, temp_label = 0.0, False, None, "--"
 
         try:
+            io_rate, io_available, io_mb, net_mb = self._sample_io()
+        except Exception:
+            io_rate, io_available, io_mb, net_mb = 0.0, False, 0.0, 0.0
+
+        try:
             return Telemetry(
                 cpu_load=cpu_load,
                 memory_pressure=mem_pressure,
@@ -313,6 +387,10 @@ class TelemetrySource:
                 mem_total_gb=mem_total_gb,
                 temp_c=temp_c,
                 temp_label=temp_label,
+                io_rate=io_rate,
+                io_available=io_available,
+                io_mb_s=io_mb,
+                net_mb_s=net_mb,
                 notes=self._notes,
             )
         except Exception:

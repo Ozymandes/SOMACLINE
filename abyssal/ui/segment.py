@@ -42,12 +42,44 @@ GLYPHS: dict[str, tuple[int, ...]] = {
     "8": (SEG_A, SEG_B, SEG_C, SEG_D, SEG_E, SEG_F, SEG_G),
     "9": (SEG_A, SEG_B, SEG_C, SEG_D, SEG_F, SEG_G),
     "-": (SEG_G,),
-    " ": (),
     "_": (SEG_D,),
+    # Unit and status letters. A real laboratory readout spells its own unit
+    # in the SAME segment technology as its digits - the unit is part of the
+    # display, not a caption printed next to it. Only the letters that a
+    # seven-segment cell can form unambiguously are defined; anything else
+    # falls back to the technical unit layer (see draw_unit).
+    "A": (SEG_A, SEG_B, SEG_C, SEG_E, SEG_F, SEG_G),
+    "C": (SEG_A, SEG_D, SEG_E, SEG_F),
+    "E": (SEG_A, SEG_D, SEG_E, SEG_F, SEG_G),
+    "F": (SEG_A, SEG_E, SEG_F, SEG_G),
+    "G": (SEG_A, SEG_C, SEG_D, SEG_E, SEG_F),
+    "H": (SEG_B, SEG_C, SEG_E, SEG_F, SEG_G),
+    "J": (SEG_B, SEG_C, SEG_D),
+    "L": (SEG_D, SEG_E, SEG_F),
+    "P": (SEG_A, SEG_B, SEG_E, SEG_F, SEG_G),
+    "S": (SEG_A, SEG_C, SEG_D, SEG_F, SEG_G),
+    "U": (SEG_B, SEG_C, SEG_D, SEG_E, SEG_F),
+    "Y": (SEG_B, SEG_C, SEG_D, SEG_F, SEG_G),
+    "b": (SEG_C, SEG_D, SEG_E, SEG_F, SEG_G),
+    "c": (SEG_D, SEG_E, SEG_G),
+    "d": (SEG_B, SEG_C, SEG_D, SEG_E, SEG_G),
+    "h": (SEG_C, SEG_E, SEG_F, SEG_G),
+    "n": (SEG_C, SEG_E, SEG_G),
+    "o": (SEG_C, SEG_D, SEG_E, SEG_G),
+    "r": (SEG_E, SEG_G),
+    "t": (SEG_D, SEG_E, SEG_F, SEG_G),
+    "u": (SEG_C, SEG_D, SEG_E),
 }
 
+#: Letters a seven-segment cell cannot form. Rendered by the unit layer.
+UNSEGMENTABLE = frozenset("KMQRVWXZ")
+
 #: Characters that occupy a narrow cell rather than a full digit cell.
-NARROW = {".": 0.34, ":": 0.34, "/": 0.58, "'": 0.30}
+#: The degree ring is one of these: it is a real element of the display glass,
+#: sized and positioned from the digit height like every other segment, so
+#: "83\u00b0C" reads as one readout rather than digits with a caption beside them.
+NARROW = {".": 0.34, ":": 0.34, "/": 0.58, "'": 0.30, "\u00b0": 0.46,
+          "%": 0.66, " ": 0.34}
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +255,33 @@ def _draw_narrow(cr, ch: str, x: float, y: float, w: float, h: float,
         cr.move_to(x + w * 0.88, y + h * 0.10)
         cr.line_to(x + w * 0.12, y + h * 0.90)
         cr.stroke()
+    elif ch == "%":
+        # Per-cent as a display element: two apertures and a virgule, struck
+        # at segment weight so it sits with the digits.
+        cr.set_line_width(max(1.0, t * 0.74))
+        cr.move_to(x + w * 0.86, y + h * 0.16)
+        cr.line_to(x + w * 0.14, y + h * 0.88)
+        cr.stroke()
+        d = max(1.5, t * 1.25)
+        cr.rectangle(x + w * 0.06, y + h * 0.10, d, d)
+        cr.rectangle(x + w * 0.94 - d, y + h * 0.90 - d, d, d)
+        cr.fill()
+    elif ch == "\u00b0":
+        # A ring in the upper third of the cell, struck at segment thickness
+        # so it carries the same weight as the digits beside it.
+        rad = w * 0.42
+        cr.set_line_width(max(1.0, t * 0.74))
+        if st.bloom > 0.0:
+            cr.set_source_rgba(r, g, b, 0.16 * st.bloom * a)
+            cr.set_line_width(max(1.4, t * 1.35))
+            cr.new_path()
+            cr.arc(x + w * 0.5, y + h * 0.20 + rad, rad, 0.0, 6.283185307179586)
+            cr.stroke()
+            cr.set_source_rgba(r, g, b, a)
+            cr.set_line_width(max(1.0, t * 0.74))
+        cr.new_path()
+        cr.arc(x + w * 0.5, y + h * 0.20 + rad, rad, 0.0, 6.283185307179586)
+        cr.stroke()
 
 
 def draw_right(cr, text: str, right_x: float, y: float, height: float,
@@ -242,3 +301,32 @@ def fit_height(text: str, box_w: float, box_h: float,
     if unit <= 0.0:
         return 0.0
     return max(0.0, min(box_h, box_w / unit))
+
+
+def draw_unit(cr, text: str, x: float, y: float, digit_h: float,
+              st: SegmentStyle = CYAN, scale: float = 0.54) -> float:
+    """Draw a UNIT beside a readout, in the same display technology.
+
+    `y` and `digit_h` describe the MAIN digits. The unit is rendered at
+    `scale` of that height and bottom-aligned to the digits' own baseline, so
+    "83" + "\u00b0C" or "8.2/13.5" + "G" sit on one optical line and read as a
+    single instrument rather than a number with a label stuck beside it.
+
+    Returns the advance width.
+    """
+    if not text or digit_h < 4.0:
+        return 0.0
+    uh = digit_h * scale
+    uy = y + digit_h - uh
+    # A unit is a caption within the display: slightly dimmer than the value
+    # it qualifies, which is what stops it competing with the digits.
+    us = SegmentStyle(lit=st.lit, thickness=st.thickness * 1.10,
+                      slant=st.slant, gap=st.gap, aspect=st.aspect,
+                      tracking=st.tracking * 0.9, ghost=st.ghost * 0.55,
+                      bloom=st.bloom * 0.8, alpha=st.alpha * 0.92)
+    return draw(cr, text, x, uy, uh, us)
+
+
+def measure_unit(text: str, digit_h: float, st: SegmentStyle = CYAN,
+                 scale: float = 0.54) -> float:
+    return measure(text, digit_h * scale, st) if text else 0.0

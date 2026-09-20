@@ -127,9 +127,9 @@ def classify(width: float, height: float) -> LayoutState:
 _METRICS = {
     LayoutState.COMPACT:    dict(pad=12.0, head=34.0, row=46.0,
                                  col=(112.0, 190.0), gap=8.0, min_stage=90.0),
-    LayoutState.INSTRUMENT: dict(pad=20.0, head=88.0, row=62.0,
+    LayoutState.INSTRUMENT: dict(pad=20.0, head=104.0, row=62.0,
                                  col=(170.0, 330.0), gap=18.0, min_stage=150.0),
-    LayoutState.ARCHIVE:    dict(pad=30.0, head=98.0, row=74.0,
+    LayoutState.ARCHIVE:    dict(pad=30.0, head=122.0, row=74.0,
                                  col=(230.0, 460.0), gap=26.0, min_stage=200.0),
 }
 
@@ -138,15 +138,18 @@ _METRICS = {
 # what makes a short wide Hyprland tile look deliberate rather than starved.
 SIDE_COLUMN_ASPECT = 1.45
 
-# The selector bank is sized from the STAGE width, not the window width, so it
-# stays proportional to the specimen it switches. Clamped at both ends: too
-# short and the engraved labels stop being legible, too tall and a hero control
-# starts eating the organism.
-_BANK_ASPECT = (48.0 + 5 * 224.0 + 46.0) / 303.0     # tools/build_sprites.py
-_BANK_SHARE = 0.66          # of stage width
-_BANK_MIN_H = 30.0
-_BANK_MAX_H = {"COMPACT": 46.0, "INSTRUMENT": 72.0, "ARCHIVE": 88.0}
-_FOOTER_H = {"COMPACT": 0.0, "INSTRUMENT": 36.0, "ARCHIVE": 52.0}
+# The specimen bank spans the observation bezel and sits directly beneath it,
+# so the glass and the five engraved creature keys read as ONE assembly. It is
+# therefore sized from the STAGE width, not the window width.
+#
+# _BANK_ASPECT is the trough's width/height at the bank's natural proportions
+# and must equal `ui.selector.natural_aspect()`; qa/console_gates.py asserts
+# that. It lives here as a constant because layout may not import ui.
+_BANK_ASPECT = 5.313
+_BANK_SHARE = 1.00          # of stage width: the trough spans the bezel
+_BANK_MIN_H = 34.0
+_BANK_MAX_H = {"COMPACT": 78.0, "INSTRUMENT": 114.0, "ARCHIVE": 152.0}
+_FOOTER_H = {"COMPACT": 0.0, "INSTRUMENT": 44.0, "ARCHIVE": 68.0}
 
 # --- outer chassis ---------------------------------------------------------
 # Proportions read off monitor_ref.png (1672x941): the enclosure takes ~3.3% of
@@ -206,9 +209,9 @@ def resolve(width: float, height: float) -> Layout:
     if show_chassis and head_h >= 58.0 and content.w > 620.0:
         # The reference splits its header into a tall title block and a short
         # status rail beneath it. Both are compartmented; see ui.console.
-        srow = min(head_h * 0.34, 26.0)
+        srow = head_h * 0.30
         header = Rect(header.x, header.y, header.w, head_h - srow)
-        status = Rect(content.x, header.bottom + 2.0, content.w, srow - 2.0)
+        status = Rect(content.x, header.bottom, content.w, srow)
         show_status = True
 
     body_top = (status.bottom if show_status else header.bottom) + gap * 0.55
@@ -251,7 +254,7 @@ def resolve(width: float, height: float) -> Layout:
         stage = Rect(body.x, body.y, body.w, max(0.0, body.h - row_h - gap * 0.6))
 
     # --- selector bank, carved from the stage column -----------------------
-    bank_h = bank_height(state, stage.w, stage.h * 0.24)
+    bank_h = bank_height(state, stage.w, stage.h * 0.30)
     if bank_h > 0.0 and stage.h - bank_h - gap * 0.5 >= m["min_stage"]:
         controls = Rect(stage.x, stage.bottom - bank_h, stage.w, bank_h)
         stage = Rect(stage.x, stage.y, stage.w,

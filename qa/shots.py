@@ -13,10 +13,16 @@ import json  # noqa: E402
 SHOTS = [("compact", 460, 380, []), ("instrument", 900, 700, []),
          ("instrument-tall", 760, 620, []), ("archive", 1400, 880, []),
          ("calibration", 900, 700, ["--calibration"]),
-         ("specimen-2-trispira", 1400, 880, ["--specimen", "1"]),
-         ("specimen-3-pentafida", 1400, 880, ["--specimen", "2"]),
-         ("specimen-4-hexastoma", 1400, 880, ["--specimen", "3"]),
-         ("specimen-5-bifida", 1400, 880, ["--specimen", "4"])]
+         ("specimen-2-funnelis", 1400, 880, ["--specimen", "1"]),
+         ("specimen-3-symmetra", 1400, 880, ["--specimen", "2"]),
+         ("specimen-4-dyad", 1400, 880, ["--specimen", "3"]),
+         ("specimen-5-frond", 1400, 880, ["--specimen", "4"])]
+
+#: Close-ups cropped from a captured shot: (source, name, x, y, w, h) as
+#: FRACTIONS of the captured image, so they survive a resolution change.
+CROPS = [("archive", "closeup-header", 0.02, 0.02, 0.96, 0.20),
+         ("archive", "closeup-module", 0.60, 0.17, 0.39, 0.22),
+         ("archive", "closeup-selector", 0.02, 0.66, 0.60, 0.22)]
 
 
 def monitor_rect():
@@ -44,7 +50,10 @@ def main() -> int:
             py = max(my + 8, my + (mh - h) // 2)
             focus(win["address"])
             dsp(f"hl.dsp.window.move({{ x = {px}, y = {py}, exact = true }})")
-            time.sleep(3.0)   # let the organism settle into a nice pose
+            # Long enough for the organism to take a pose AND for the
+            # 0.5s rolling frame-rate average to shed the cost of the
+            # float/resize/move that got the window here.
+            time.sleep(7.0)
             win = find_win(proc.pid)
             x, y = win["at"]; sw, sh = win["size"]
             # clamp to the monitor so grim never captures off-screen white
@@ -60,8 +69,27 @@ def main() -> int:
             try: proc.wait(timeout=5)
             except subprocess.TimeoutExpired: proc.kill()
             settle(0.4)
+    _write_crops()
     hypr("dispatch", "hl.dsp.focus({ workspace = '1' })")
     return 0
+
+
+def _write_crops() -> None:
+    """Cut the required close-ups out of the captured frames."""
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  (Pillow absent - close-ups skipped)")
+        return
+    for src, name, fx, fy, fw, fh in CROPS:
+        path = os.path.join(OUT, f"{src}.png")
+        if not os.path.exists(path):
+            continue
+        im = Image.open(path)
+        w, h = im.size
+        box = (int(fx * w), int(fy * h), int((fx + fw) * w), int((fy + fh) * h))
+        im.crop(box).save(os.path.join(OUT, f"{name}.png"))
+        print(f"  {name:<16} {box[2] - box[0]}x{box[3] - box[1]}")
 
 
 if __name__ == "__main__":

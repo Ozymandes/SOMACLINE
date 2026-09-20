@@ -243,3 +243,143 @@ by dropping a layer rather than by shrinking everything:
 | ARCHIVE | ruler + 4 blocks + scale bar | full bay incl. status column | 3 compartments + status rail |
 | INSTRUMENT | ruler + specimen block | bay with graph well | 3 compartments + status rail |
 | COMPACT | brackets + graticule | condensed 4-up rail | one line + LIVE + clock |
+
+---
+
+# Visual-integration pass
+
+Four things changed shape in this pass. Each solved a problem that could not
+be solved by tuning numbers.
+
+## 1. Fascia bays: text has a physical home
+
+`abyssal/skin/fascia.py`.
+
+The generated hardware was never flat metal. The header asset is a
+manufactured panel with four recessed information bays over a three-bay
+status rail; the module shell has an identity plaque, a title bay, four
+annunciator wells and three display recesses. Those recesses are the point of
+the artwork. Drawing the panel and then placing type wherever the layout felt
+like throws away exactly the thing that was paid for — and it is precisely
+what makes a UI read as an overlay: the type has no physical home.
+
+A `Fascia` is therefore a sprite **plus the measured source-pixel rectangle of
+every recess cut into it**. Bays were located by connected-component analysis
+of the sprite's own dark regions (luminance < 48 under opaque alpha), not by
+eye. `place()` scales the panel and returns the same bays in widget pixels.
+
+Scaling is a three-band slice per axis: the end caps (screws, frame edge)
+scale uniformly, and only the middle stretches. `place()` maps the bays
+through that identical piecewise transform, so the bays a caller is handed are
+where the metal actually is, at every size, by construction.
+
+On top of that sit five rules, implemented once in `ui/console.py` rather than
+re-invented per call site:
+
+1. a physical bay — a recess measured off the asset
+2. internal padding — proportional, with a pixel floor
+3. a defined baseline — from the bay's own box, never the panel's
+4. a defined alignment, declared per line
+5. a responsive rule: shrink to the legibility floor, then ellipsise, and for
+   an observation reading, drop the row rather than truncate it
+
+## 2. Five organisms, not one with a parameter
+
+`abyssal/organism/mathforms.py`.
+
+The previous catalogue was a single radial-plume solver with the symmetry
+order changed, which is why switching specimens only ever changed how many
+arms the creature had. It has been replaced by five separate body plans —
+a ciliated sigmoid ribbon, a colony of ruled conic funnels, an exactly
+mirrored rostrum, a coupled comb-and-orbit pair, and an arcuate frond — each
+a compact set of point equations solved into the buffers every frame.
+
+The engine contract is unchanged and still load-bearing: world units only,
+every array allocated once, `update()` writes in place, state is a function of
+accumulated time and physiology and never of geometry. What changed is that
+`Body` is now a base class with a `_sizes()` / `_build()` / `_shape()`
+protocol instead of one solver with a parameter block.
+
+Two additions to the buffers the renderer reads:
+
+- `fil_dot` — a per-filament dot pitch. The reference engravings are drawn as
+  sequences of dots, not continuous ink; a dash pattern reproduces that for
+  the cost of one call, where one filament per dot would multiply the path
+  count by twenty.
+- `core_r` may be zero. A body whose structure *is* its centre would be
+  falsified by a glowing bead at the world origin.
+
+Telemetry reaches each body as morphology, never as animation speed. The
+clearest case is `Symmetra`: its mirror plane is exact at rest (GATE 4
+asserts a residual of 0.0 world units) and **breaks** above 0.88 thermal
+pulse, so heat is legible as the organism failing to match itself.
+
+`Physiology` gained `flux` and `surge` from a new I/O + network channel in
+`telemetry/source.py`. `surge` uses an asymmetric envelope — fast attack, slow
+release — so a burst propagates through a body as an event rather than
+flickering.
+
+## 3. The specimen keys are the hero control
+
+`abyssal/ui/selector.py`.
+
+Five bespoke console keys, each engraved with one organism's morphology, in
+two authored states. The artwork is the specimen's identity, so it is never
+tinted or recoloured at runtime; selecting a specimen swaps to that key's own
+illuminated plate, and a press is mechanical travel drawn on top, not a
+repainted PNG.
+
+The mounting is deliberately quieter than the keys: one dark trough with a
+machined gunmetal floor, a seat shadow per key, hairline divider ribs, and an
+engraved channel identifier beneath. The previous bank's flat black field
+behind the cluster was not a sprite matte — it was a procedural recess — and
+it was what made the control read as five images pasted on a background.
+
+`layout()` remains a pure function from a rect to key rectangles, serving
+drawing, hit testing and QA from one answer. Keys are drawn at one uniform
+scale and their authored aspect, always; a row wider than they need is
+resolved by spacing and centring, never by stretching.
+
+## 4. The static hardware layer
+
+`ui/console.py`, `core/lighting.py`, `organism/render.py`.
+
+Most of this console does not change between frames. The chassis, the bezels,
+the header fascia and its engraved names, the archive rail, the selector's
+mounting, the field's graticule and rulers are all a pure function of the
+widget size and which specimen is selected.
+
+Three caches were added, all of them derived pixels only:
+
+- **Two layer surfaces** — one behind the organism, one in front — keyed by
+  every discrete input the static passes read.
+- **The lighting falloff**, as an A8 mask per quantised radius. Rasterising
+  ~20 radial gradients a frame was 3.5ms; stamping a cached mask with a flat
+  colour is 0.16ms for the same pixels.
+- **The deep-field wash**, as a rendered disc per quantised radius. At 6.5ms
+  it was by a wide margin the most expensive single operation in the frame,
+  and its radius changes only on resize.
+
+The safety property that makes this acceptable is the same one that made the
+sprite cache acceptable: the key is the complete set of inputs, so a hit can
+only ever be identical to a miss. `qa/console_gates.py` GATE 8 renders each
+frame warm and cold at three sizes and asserts the two are byte-identical.
+
+Measured effect, full frame including simulation:
+
+| size | before | after |
+|---|---|---|
+| 900x700 | 10.97 ms | 5.43 ms |
+| 1400x860 | 16.14 ms | 6.85 ms |
+| 1920x1080 | 21.38 ms | 9.11 ms |
+| 2560x1600 | 32.93 ms | 12.89 ms |
+
+## What GATE 1 asserts now
+
+The old geometry gate asserted *quadrant balance* — equal filament mass per
+diagonal quadrant. That is a property of a four-fold radial plume and of
+nothing else in the current catalogue, so it was replaced by the claim that
+actually matters and holds for any body plan: projecting the body through the
+viewport and unprojecting it must be the identity. Any anisotropy, rounding or
+centre drift shows up as a non-zero residual. Measured residual across twenty
+sizes: `< 9e-13` world units.

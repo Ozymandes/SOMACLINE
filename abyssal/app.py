@@ -36,7 +36,7 @@ from .core.physiology import PhysiologyModel
 from .core.signals import Telemetry
 from .core.theme import ABYSS
 from .core.viewport import Viewport, isotropy_error
-from .organism.form import AbyssalForm
+from .organism.mathforms import Body
 from .organism.render import draw_calibration, draw_organism
 from .organism.species import CATALOGUE, by_index
 from .telemetry.source import TelemetrySource
@@ -64,7 +64,7 @@ class Monitor(Gtk.ApplicationWindow):
         # the process. Switching selects an existing instance rather than
         # constructing one, so a switch allocates nothing on the hot path and
         # each specimen resumes exactly where it was left.
-        self._organisms: dict[int, AbyssalForm] = {}
+        self._organisms: dict[int, Body] = {}
         self.species_index = max(0, min(len(CATALOGUE) - 1, opts.specimen))
         self.org = self._organism(self.species_index)
         self.phys_model = PhysiologyModel()
@@ -126,10 +126,10 @@ class Monitor(Gtk.ApplicationWindow):
         self.connect("notify::default-width", lambda *_: None)
 
     # -------------------------------------------------------------- specimens
-    def _organism(self, i: int) -> AbyssalForm:
+    def _organism(self, i: int) -> Body:
         org = self._organisms.get(i)
         if org is None:
-            org = AbyssalForm(by_index(i).morph, seed=self.opts.seed + i)
+            org = by_index(i).build(seed=self.opts.seed + i)
             self._organisms[i] = org
         return org
 
@@ -161,6 +161,8 @@ class Monitor(Gtk.ApplicationWindow):
         kind, idx = target
         if kind == "key":
             self.select_specimen(idx)
+        elif kind == "cycle":
+            self.cycle_specimen(idx)
         elif kind == "mode":
             order = ("inactive", "armed", "active", "error")
             cur = self.model.mode_state
@@ -277,7 +279,8 @@ class Monitor(Gtk.ApplicationWindow):
 
         self._refresh_field(vp)
 
-        draw_background(cr, width, height)
+        # draw_background is painted INTO the cached static under-layer;
+        # see ui.console.draw_under.
         console.draw_under(cr, layout, self.model, vp.scale)
         if layout.stage.valid:
             glass = console.stage_content(layout)
@@ -319,6 +322,8 @@ class Monitor(Gtk.ApplicationWindow):
         mdl.coords = (cx, cy, 0.0)
         mdl.behavior = ("AGITATED" if p.agitation > 0.66 else
                         "ACTIVE" if p.agitation > 0.33 else "STABLE")
+        mdl.flux = p.flux
+        mdl.surge = p.surge
         # The viewport scale IS the magnification, so the readout is true.
         mdl.magnification = max(0.1, vp.scale * 10.0)
         mdl.field_mm = max(0.01, min(vp.stage_w, vp.stage_h) / vp.scale / 400.0)
@@ -381,6 +386,8 @@ class Monitor(Gtk.ApplicationWindow):
             "resizes": self.resizes,
             "rebuilds": self.rebuilds,
             "fps": self._fps,
+            "draw_ms": self._draw_ms,
+            "sim_ms": self._sim_ms,
         }) + "\n")
 
 

@@ -1,12 +1,27 @@
 # ABYSSAL ORGANISM MONITOR
 
-A living computational instrument for Linux. It renders one procedural
-specimen — **PLUMIRADIA QUADRILOBATA**, *the quartered plume* — whose
+A biocomputational observation console for Linux. Five procedural specimens
+live behind its glass, each a different set of point equations, and their
 physiology responds to real machine telemetry.
 
-This is the first POC. Its purpose is to prove the foundation: window
-behaviour, responsive scaling and rendering stability, under a tiling
-compositor, at a **normal tile size** rather than fullscreen.
+The console itself is built from a bespoke hardware library: a header fascia,
+a module shell, an archive rail and five engraved specimen keys, each with
+its recesses measured off the artwork so that every line of type sits inside
+a bay that was manufactured for it.
+
+## The catalogue
+
+| # | Specimen | Body plan | Reads |
+|---|---|---|---|
+| 01 | CILIARADIA SIGMATA | sigmoid spine, club-tipped cilia on both flanks | load as beat frequency |
+| 02 | INFUNDIBULA COLONIALIS | three dotted conical bells, trailing tendrils | heat as aperture |
+| 03 | SYMMETRA ROSTRATA | exact mirror plane: rostrum, spiral eyes, eight arms | heat breaks the mirror |
+| 04 | DYADIS CONIUGATA | two bodies — a dense comb and a wandering orbit | I/O as a travelling packet |
+| 05 | PLUMIRADIA FALCATA | one long arcuate rachis under a hood | highest motion sensitivity |
+
+They are five different organisms, not one solver with the symmetry order
+changed; `qa/console_gates.py` GATE 4 measures a shape signature for each and
+fails if any two come out similar.
 
 ## Requirements
 
@@ -29,6 +44,9 @@ third-party Python packages. Telemetry reads `/proc` and `/sys` directly.
 
 | key | |
 |---|---|
+| `1`–`5` | select a specimen (or click its engraved key) |
+| `←` `→` | previous / next specimen |
+| `m` | cycle the mode key |
 | `F1` | diagnostic overlay (size, scale, viewport, FPS, sim clock) |
 | `F2` | calibration geometry — circles and quadrant spokes |
 | `F`  | toggle fullscreen |
@@ -37,10 +55,12 @@ third-party Python packages. Telemetry reads `/proc` and `/sys` directly.
 ## Test
 
 ```sh
-python3 qa/gates.py            # GATE 1 geometry + GATE 3 performance, headless
-python3 qa/torture.py --shots  # GATE 0: real Hyprland resize torture test
-python3 -m abyssal.telemetry.source     # GATE 4: live telemetry
-python3 -m abyssal.organism.plumiradia  # organism self-test
+python3 qa/gates.py              # GATE 1 geometry + GATE 3 performance
+python3 qa/console_gates.py      # GATES 4-8 species, skin, selector, cache
+python3 qa/torture.py --shots    # GATE 0: real Hyprland resize torture test
+python3 qa/offscreen.py out.png --width 1400 --height 880
+python3 qa/specimen_sheet.py catalogue.png
+python3 -m abyssal.telemetry.source      # live telemetry
 ```
 
 `qa/torture.py` drives the real window through tile / resize / fullscreen /
@@ -59,18 +79,31 @@ abyssal/
     layout.py         responsive states (COMPACT / INSTRUMENT / ARCHIVE)
     signals.py        Telemetry and Physiology value types
     physiology.py     Telemetry -> Physiology, smoothed
+    lighting.py       restrained spill from lit displays
     theme.py          palette and type
   organism/
-    plumiradia.py     deterministic generator + simulator (world units only)
-    render.py         cairo drawing of the organism
+    mathforms.py      the five organisms: point equations, world units only
+    species.py        the catalogue: body plan + archive metadata
+    render.py         cairo drawing of any organism
   telemetry/
     source.py         /proc and /sys sampling, with graceful fallback
+  skin/
+    surface.py        sprite loading, 9-slice, bounded surface cache
+    catalog.py        which sprite, and how it may scale
+    fascia.py         generated panels + the measured bays cut into them
   ui/
-    chrome.py         instrument text and readouts
+    console.py        the physical console: hardware + live content
+    selector.py       the five engraved specimen keys
+    segment.py        procedural seven-segment display, with units
+    chrome.py         text primitives and the background
     debug.py          F1 diagnostic overlay
 qa/
   gates.py            headless geometry and performance gates
+  console_gates.py    species, skin, selector, switching, static layer
+  offscreen.py        headless single-frame capture
+  specimen_sheet.py   the catalogue as one contact sheet
   torture.py          Hyprland resize torture harness
+  shots.py            product screenshots from the real app
 docs/
   ARCHITECTURE.md     why this stack, and the resize contract
   VALIDATION.md       measured results

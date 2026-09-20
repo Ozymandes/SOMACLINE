@@ -1,7 +1,21 @@
-"""The specimen selector bank: geometry, drawing and hit testing.
+"""The specimen selector: five engraved creature keys in a mounting trough.
 
-This is a PHYSICAL control, not a tab bar. Five latching console keys in a
-machined fascia, one per specimen channel.
+WHAT THIS IS
+------------
+Not a tab bar, and no longer a bank of generic mode switches. Each key is a
+bespoke console key whose face carries the ENGRAVED MORPHOLOGY of one of the
+five mathematical organisms, in two authored states: raised/unlit and
+seated/illuminated. The artwork is the specimen's identity, so it is never
+tinted, recoloured or redrawn at runtime - selecting a specimen swaps to that
+key's own active plate.
+
+THE MOUNTING IS DELIBERATELY QUIET
+----------------------------------
+The keys are the hero. Everything around them is the minimum structure needed
+to make them read as installed rather than pasted on: one dark recessed
+trough, a thin backing rail, a seat shadow under each key, hairline divider
+ribs, and an engraved channel identifier beneath. No second bezel, no
+competing housing.
 
 SEPARATION
 ----------
@@ -9,22 +23,18 @@ SEPARATION
 nothing and touches no pixels, so the same call serves three callers that must
 never disagree:
 
-    * drawing          - where to blit each key state
+    * drawing          - where to blit each key plate
     * hit testing      - which key the pointer is over
-    * label placement  - where chrome draws the engraved specimen names
+    * label placement  - where the engraved channel identifiers go
 
-Deriving all three from one function is what stops the visual bank and the
+Deriving all three from one function is what stops the visible bank and the
 clickable bank drifting apart.
 
-STATE
------
-Each key resolves to exactly one sprite state, in priority order:
-
-    disabled > pressed > latched (this is the live specimen) > focus > idle
-
-`pressed` is momentary and lives in the UI, not the model: it is a timestamp
-that decays, so a click always produces a visible mechanical response even if
-the switch itself completes in the same frame.
+SCALING
+-------
+These are raster hardware plates. They are drawn with ONE uniform scale factor
+and their authored aspect, always. A row wider than the keys need is resolved
+by spacing and centring, never by stretching.
 """
 
 from __future__ import annotations
@@ -35,93 +45,192 @@ from ..core.layout import Rect
 from ..skin import catalog as C
 from ..skin.surface import draw_sprite, sprite_size
 
-#: Natural proportions of the assembled bank, from tools/build_sprites.py.
-#: cap_left(48) + 5 * cell(224) + cap_right(46) by cell height(303).
-_CAP_L_W, _CAP_R_W, _CELL_W, _CELL_H = 48.0, 46.0, 224.0, 303.0
+#: Authored proportions of one key plate (tools/build_sprites.py emits 256 x
+#: 267). Kept as a constant so layout can size the bank without loading pixels.
+KEY_ASPECT = 256.0 / 267.0
 
+#: Gap between adjacent keys, as a share of key width. Enough air that each
+#: engraving reads as its own object, tight enough that the five read as one
+#: instrument.
+_GAP_SHARE = 0.17
 
-def natural_aspect(n: int = 5) -> float:
-    return (_CAP_L_W + n * _CELL_W + _CAP_R_W) / _CELL_H
+#: Height of the engraved identifier ledge beneath the keys, as a share of key
+#: height, and the floor below which it is dropped rather than crushed.
+_LEDGE_SHARE = 0.145
+_LEDGE_MIN = 8.0
+
+#: Wall of the mounting trough, as a share of its height.
+_WALL = 0.055
+
+#: Share of the trough width the five keys may occupy. The remainder is the
+#: metal at each end that seats the auxiliary controls, which keeps the five
+#: specimen keys CENTRED on the observation glass above them.
+_SPAN_SHARE = 0.78
+
+#: Auxiliary control heights, as a share of key height, and their authored
+#: aspects (tools/build_sprites.py emits 160x226 and 192x113).
+_MODE_H = 0.55
+_CYCLE_H = 0.33
+_MODE_ASPECT = 160.0 / 226.0
+_CYCLE_ASPECT = 192.0 / 113.0
+
+#: Mechanical travel of a pressed key, as a share of key height.
+PRESS_TRAVEL = 0.022
 
 
 @dataclass(frozen=True, slots=True)
 class BankGeometry:
-    """Where the bank and every key landed, in widget pixels."""
+    """Where the trough, every key and every identifier landed, in pixels."""
 
     x: float
     y: float
     w: float
     h: float
-    cap_l: float
-    cap_r: float
-    cell_w: float
+    key_x: float          # left edge of key 0
+    key_y: float
+    key_w: float
+    key_h: float
+    pitch: float          # key_w + gap
+    ledge: float          # height of the identifier ledge, 0 if dropped
     n: int
+    #: Auxiliary seats at each end of the trough. Invalid when there is no
+    #: metal to spare, in which case those controls simply are not fitted.
+    aux_l: Rect = Rect(0.0, 0.0, 0.0, 0.0)
+    aux_r: Rect = Rect(0.0, 0.0, 0.0, 0.0)
 
     def key_rect(self, i: int) -> Rect:
-        return Rect(self.x + self.cap_l + i * self.cell_w, self.y,
-                    self.cell_w, self.h)
+        return Rect(self.key_x + i * self.pitch, self.key_y,
+                    self.key_w, self.key_h)
 
     def label_rect(self, i: int) -> Rect:
-        """The engraved label ledge above a key, in bank-relative proportions.
+        """The engraved identifier ledge beneath key `i`."""
+        k = self.key_rect(i)
+        return Rect(k.x, k.bottom, k.w, self.ledge)
 
-        Measured off the master: the ledge occupies the top ~14% of a cell and
-        is inset from the divider ribs.
+    def lamp_point(self, i: int) -> tuple[float, float, float]:
+        """Centre and radius of the key's illuminated strip, for the light pass.
+
+        The authored active plate lights a bar across the top of the key; the
+        lighting pass only adds the faint catch that bar would throw onto the
+        metal immediately around it.
         """
         k = self.key_rect(i)
-        return Rect(k.x + k.w * 0.10, k.y + k.h * 0.045,
-                    k.w * 0.80, k.h * 0.105)
+        return (k.cx, k.y + k.h * 0.13, k.w * 0.30)
 
-    def face_rect(self, i: int) -> Rect:
-        """The keycap face, where a channel index may be drawn."""
-        k = self.key_rect(i)
-        return Rect(k.x + k.w * 0.10, k.y + k.h * 0.22,
-                    k.w * 0.80, k.h * 0.42)
+    @property
+    def keys_rect(self) -> Rect:
+        """The bounding box of the five keys, for seating the backing rail."""
+        return Rect(self.key_x, self.key_y,
+                    self.pitch * (self.n - 1) + self.key_w, self.key_h)
 
     @property
     def valid(self) -> bool:
-        return self.w > 8.0 and self.h > 6.0 and self.cell_w > 2.0
+        return self.w > 8.0 and self.key_w > 6.0 and self.key_h > 6.0
+
+
+def natural_aspect(n: int = 5) -> float:
+    """Trough width / trough height at the bank's natural proportions.
+
+    Used by `core.layout` to size the control row from the stage width without
+    loading a single pixel, so layout stays a pure function of the widget size.
+    """
+    inner = 1.0 - 2.0 * _WALL
+    key_h = inner * (1.0 - _LEDGE_SHARE)
+    key_w = key_h * KEY_ASPECT
+    span = n * key_w + (n - 1) * key_w * _GAP_SHARE
+    return span / _SPAN_SHARE
 
 
 def layout(box: Rect, n: int = 5) -> BankGeometry:
-    """Fit the bank inside `box`, preserving its natural aspect, centred.
+    """Fit the bank inside `box`, aspect-true and centred. Pure.
 
-    Pure. No allocation beyond the returned value, no pixel access.
+    Height is the binding constraint: the keys take the height they are given
+    and the row is centred in whatever width is available. A box wider than the
+    keys need leaves metal at both ends, which is what the trough is for - it
+    is never spent stretching a raster plate.
     """
-    aspect = natural_aspect(n)
-    w = box.w
-    h = w / aspect
-    if h > box.h:
-        h = box.h
-        w = h * aspect
-    x = box.x + (box.w - w) * 0.5
-    y = box.y + (box.h - h) * 0.5
-    k = h / _CELL_H
-    cap_l = _CAP_L_W * k
-    cap_r = _CAP_R_W * k
-    cell_w = (w - cap_l - cap_r) / n
-    return BankGeometry(x=x, y=y, w=w, h=h, cap_l=cap_l, cap_r=cap_r,
-                        cell_w=cell_w, n=n)
+    if box.w < 12.0 or box.h < 10.0:
+        return BankGeometry(box.x, box.y, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                            0.0, 0.0, n)
+    wall = max(2.0, box.h * _WALL)
+    inner_h = box.h - wall * 2.0
+    inner_w = box.w - wall * 2.0
+
+    ledge = inner_h * _LEDGE_SHARE
+    if ledge < _LEDGE_MIN:
+        ledge = 0.0
+    key_h = inner_h - ledge
+    key_w = key_h * KEY_ASPECT
+    gap = key_w * _GAP_SHARE
+    span = n * key_w + (n - 1) * gap
+
+    budget = min(inner_w, box.w * _SPAN_SHARE)
+    if span > budget:
+        # Too narrow at this height: shrink the keys uniformly on BOTH axes so
+        # the authored plate is never squeezed horizontally.
+        k = budget / span
+        key_w *= k
+        key_h *= k
+        gap *= k
+        ledge *= k
+        if ledge < _LEDGE_MIN:
+            ledge = 0.0
+        span = budget
+
+    key_x = box.x + (box.w - span) * 0.5
+    key_y = box.y + (box.h - (key_h + ledge)) * 0.5
+
+    # Auxiliary seats in the metal left over at each end.
+    end = key_x - box.x - wall
+    cy = key_y + key_h * 0.5
+    cyc_h = key_h * _CYCLE_H
+    cyc_w = cyc_h * _CYCLE_ASPECT
+    mode_h = key_h * _MODE_H
+    mode_w = mode_h * _MODE_ASPECT
+    aux_l = (Rect(box.x + wall + (end - cyc_w) * 0.5, cy - cyc_h * 0.5,
+                  cyc_w, cyc_h)
+             if end > cyc_w * 1.20 else Rect(0.0, 0.0, 0.0, 0.0))
+    aux_r = (Rect(box.right - wall - (end + mode_w) * 0.5, cy - mode_h * 0.5,
+                  mode_w, mode_h)
+             if end > mode_w * 1.60 else Rect(0.0, 0.0, 0.0, 0.0))
+
+    return BankGeometry(x=box.x, y=box.y, w=box.w, h=box.h,
+                        key_x=key_x, key_y=key_y, key_w=key_w, key_h=key_h,
+                        pitch=key_w + gap, ledge=ledge, n=n,
+                        aux_l=aux_l, aux_r=aux_r)
 
 
 def hit(geo: BankGeometry, px: float, py: float) -> int | None:
     """Index of the key under (px, py), or None.
 
-    Only the key cells are live; the end caps are structure, not controls.
+    Tests the KEY PLATES, not the trough: the mounting is structure, not a
+    control, so the clickable area is exactly what the eye sees as a button.
     """
     if not geo.valid:
         return None
-    if not (geo.y <= py <= geo.y + geo.h):
+    if not (geo.key_y <= py <= geo.key_y + geo.key_h):
         return None
-    rel = px - (geo.x + geo.cap_l)
+    rel = px - geo.key_x
     if rel < 0.0:
         return None
-    i = int(rel // geo.cell_w)
-    return i if 0 <= i < geo.n else None
+    i = int(rel // geo.pitch)
+    if not (0 <= i < geo.n):
+        return None
+    # Reject the gap between two keys: the pitch includes it.
+    if rel - i * geo.pitch > geo.key_w:
+        return None
+    return i
 
 
 def key_state(i: int, active: int, pressed: int | None,
               focus: int | None, disabled: frozenset[int] = frozenset()) -> str:
-    """Resolve one key to a sprite state. Order matters; see module docstring."""
+    """Resolve one key to a plate. Order matters.
+
+    disabled > pressed > latched (the live specimen) > focus > idle.
+    `pressed` and `latched` both show the ILLUMINATED plate - a key being
+    pressed is a key being selected - and they differ by mechanical travel,
+    which is drawn, not painted into the artwork.
+    """
     if i in disabled:
         return "disabled"
     if pressed == i:
@@ -133,29 +242,35 @@ def key_state(i: int, active: int, pressed: int | None,
     return "idle"
 
 
-def draw(cr, geo: BankGeometry, active: int, pressed: int | None = None,
-         focus: int | None = None, disabled: frozenset[int] = frozenset(),
-         alpha: float = 1.0) -> None:
-    """Blit the bank: left cap, one cell per channel, right cap."""
+def plate(state: str) -> str:
+    """Which of the two authored plates a resolved state uses."""
+    return "active" if state in ("pressed", "latched") else "inactive"
+
+
+def sprite_name(i: int, state: str) -> str:
+    return C.specimen_key(i, plate(state))
+
+
+def sprites_available(n: int = 5) -> bool:
+    return all(sprite_size(C.specimen_key(i, s))[0] > 0
+               for i in range(n) for s in ("inactive", "active"))
+
+
+def draw_keys(cr, geo: BankGeometry, active: int, pressed: int | None = None,
+              focus: int | None = None,
+              disabled: frozenset[int] = frozenset(),
+              alpha: float = 1.0) -> None:
+    """Blit the five key plates. The mounting is drawn by the caller first.
+
+    Each plate is drawn at the geometry's own key size, which preserves the
+    authored aspect by construction; a pressed key is offset downward by its
+    mechanical travel instead of being redrawn.
+    """
     if not geo.valid:
         return
-    if sprite_size(C.SELECTOR_CAP_L)[0]:
-        draw_sprite(cr, C.SELECTOR_CAP_L, geo.x, geo.y, geo.cap_l, geo.h, alpha)
     for i in range(geo.n):
         st = key_state(i, active, pressed, focus, disabled)
         r = geo.key_rect(i)
-        # Cells are butted edge to edge; rounding each independently would
-        # open one-pixel seams between them at some sizes.
-        x0 = round(r.x)
-        x1 = round(r.x + r.w)
-        draw_sprite(cr, C.selector_cell(st), x0, geo.y, x1 - x0, geo.h, alpha)
-    if sprite_size(C.SELECTOR_CAP_R)[0]:
-        draw_sprite(cr, C.SELECTOR_CAP_R,
-                    geo.x + geo.cap_l + geo.n * geo.cell_w, geo.y,
-                    geo.cap_r, geo.h, alpha)
-
-
-def lamp_point(geo: BankGeometry, i: int) -> tuple[float, float, float]:
-    """Centre and radius of a key's indicator aperture, for the lighting pass."""
-    k = geo.key_rect(i)
-    return (k.cx, k.y + k.h * 0.855, k.h * 0.075)
+        dy = geo.key_h * PRESS_TRAVEL if st == "pressed" else 0.0
+        a = alpha * (0.42 if st == "disabled" else 1.0)
+        draw_sprite(cr, sprite_name(i, st), r.x, r.y + dy, r.w, r.h, a)
