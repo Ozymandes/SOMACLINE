@@ -180,3 +180,66 @@ organism.
 drawing, hit testing and QA all call it. The bank you can see and the bank you
 can click are the same bank by construction; GATE 6 asserts it at every layout
 size.
+
+---
+
+# Visual fidelity pass
+
+The skin pass made the UI *use* the hardware library; this pass made it look
+like the machine in `monitor_ref.png`. Four structural things were missing, and
+they are what the reference's authority actually rests on.
+
+**The enclosure.** Panels floated on black. The reference puts everything inside
+one frame with corner screws and side handle rails, so `core/layout` now carves
+a `chassis` rect first and everything else is laid out inside its inner face.
+`console._draw_chassis` bolts it together from the plate plus real parts.
+
+**Text belongs in recesses.** Once the chassis plate sat behind everything, half
+the microcopy vanished: the instrument ink is a near-black palette and is
+invisible on lit metal. The reference never puts type on bare metal - every text
+zone is a dark inset. Module interiors, the header and the rails are now cut
+with `console._rail`, and the type reads again. This is a rule, not a fix: if a
+new label is unreadable, it is on metal and wants a recess.
+
+**Borders cannot stay 1:1 forever.** A 9-sliced border is authored at the
+sprite's own size. The observation bezel carries 178px of metal vertically at
+1280x900; at a 489px stage that was 36% of the field, and the specimen could not
+command it. `skin.surface` now scales borders by how far below its authored size
+a panel is drawn, using ONE factor for both axes so corners stay square.
+
+**Density is structure, not noise.** Each telemetry bay carries what the
+reference's does - index plaque, title, subtitle, four labelled annunciators, a
+graph well with its own axis and caption, the numeric housing, and a
+TARGET/PEAK/delta/STATE column. The observation field carries a measured RADIUS
+axis, a SCALE bar, registration brackets and four annotation blocks. All of it
+is live: nothing in either is a fixed string standing in for a number.
+
+## Why the console got faster while getting denser
+
+The enriched draw cost 14.2ms at 1400x860. Three caches brought it to 8.0ms,
+below the *pre-enrichment* 8.5ms:
+
+* `chrome._text_w` is memoised. Layout decisions (widest key in a block, the
+  axis gutter, the motto column) re-measure the same strings every frame, and
+  each miss is a full Pango shaping pass.
+* `console._show` caches rendered glyph runs. The console draws ~140 strings a
+  frame and nearly all are byte-identical between frames. Each distinct
+  (text, size, weight, tracking, colour, alpha, align, max_w) is rasterised once
+  and then blitted. Positions round to whole pixels, which also stops microcopy
+  shimmering as the values beside it change.
+* `console._rings` rasterises the dotted polar rings once per field size. A
+  dashed arc is among the more expensive things Cairo can be asked for.
+
+All three are keyed by their complete inputs, so none can change what is drawn.
+
+## Graduated states
+
+The three layout states are the same machine, not a poster and two apologies.
+Thresholds are on the space a component actually receives, so a state degrades
+by dropping a layer rather than by shrinking everything:
+
+| | field annotation | telemetry bay | header |
+|---|---|---|---|
+| ARCHIVE | ruler + 4 blocks + scale bar | full bay incl. status column | 3 compartments + status rail |
+| INSTRUMENT | ruler + specimen block | bay with graph well | 3 compartments + status rail |
+| COMPACT | brackets + graticule | condensed 4-up rail | one line + LIVE + clock |

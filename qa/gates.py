@@ -156,12 +156,12 @@ def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
         org_ms = (time.perf_counter() - t) / n * 1000
 
         for _ in range(4):   # warm the skin cache at this exact size
-            console.draw_under(cr, L, cm)
+            console.draw_under(cr, L, cm, vp.scale)
             console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
 
         t = time.perf_counter()
         for _ in range(n):
-            console.draw_under(cr, L, cm)
+            console.draw_under(cr, L, cm, vp.scale)
             console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
         chr_ms = (time.perf_counter() - t) / n * 1000
 
@@ -175,7 +175,7 @@ def gate3_performance(outdir: str | None = None) -> tuple[bool, list[str]]:
                             f"(> 16.6ms 60fps budget)")
         if outdir:
             draw_background(cr, w, h)
-            console.draw_under(cr, L, cm)
+            console.draw_under(cr, L, cm, vp.scale)
             draw_organism(cr, vp, org)
             console.draw_over(cr, L, FAKE, 60.0, 16.6, cm, light)
             surf.write_to_png(os.path.join(outdir, f"gate-{w}x{h}.png"))

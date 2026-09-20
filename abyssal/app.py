@@ -275,8 +275,10 @@ class Monitor(Gtk.ApplicationWindow):
             self._press_index = None
         self.model.pressed = self._press_index
 
+        self._refresh_field(vp)
+
         draw_background(cr, width, height)
-        console.draw_under(cr, layout, self.model)
+        console.draw_under(cr, layout, self.model, vp.scale)
         if layout.stage.valid:
             glass = console.stage_content(layout)
             cr.save()
@@ -295,6 +297,31 @@ class Monitor(Gtk.ApplicationWindow):
 
         self.frames += 1
         self._tick_fps()
+
+    def _refresh_field(self, vp) -> None:
+        """Push live observation-field values into the console model.
+
+        These drive the SPECIMEN FIELD / MORPHOLOGY / VECTOR FIELD blocks. They
+        are read from the running organism, not invented, so the readouts move
+        with the specimen rather than decorating it.
+        """
+        org = self.org
+        mdl = self.model
+        p = self.phys_model.current
+        mdl.phase = (org.time * 0.31) % 2.0
+        mdl.rotation = 0.08 + 0.42 * p.agitation
+        # Centroid of the filament cloud, expressed in field millimetres.
+        try:
+            cx = float(org.fil_x.mean()) / 400.0
+            cy = float(org.fil_y.mean()) / 400.0
+        except Exception:
+            cx = cy = 0.0
+        mdl.coords = (cx, cy, 0.0)
+        mdl.behavior = ("AGITATED" if p.agitation > 0.66 else
+                        "ACTIVE" if p.agitation > 0.33 else "STABLE")
+        # The viewport scale IS the magnification, so the readout is true.
+        mdl.magnification = max(0.1, vp.scale * 10.0)
+        mdl.field_mm = max(0.01, min(vp.stage_w, vp.stage_h) / vp.scale / 400.0)
 
     def _tick_fps(self) -> None:
         self._fps_accum += 1

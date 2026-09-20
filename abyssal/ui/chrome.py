@@ -140,13 +140,30 @@ def _prepare(text: str, size: float, weight: int, tracking: float) -> None:
     _LAY.set_text(text, -1)
 
 
+_TW_CACHE: dict[tuple, float] = {}
+_TW_LIMIT = 4096
+
+
 def _text_w(text: str, size: float, weight: int, tracking: float) -> float:
-    """Visual advance width, with the trailing half letter-space removed."""
+    """Visual advance width, with the trailing half letter-space removed.
+
+    Memoised: the console asks for the same measurements every frame to make
+    layout decisions (widest key in a block, axis gutter, motto column), and
+    each miss costs a full Pango shaping pass. The result is a pure function of
+    the arguments, so caching it cannot change output - only cost.
+    """
     if not text:
         return 0.0
+    key = (text, round(size, 2), weight, round(tracking, 3))
+    hit = _TW_CACHE.get(key)
+    if hit is not None:
+        return hit
     _prepare(text, size, weight, tracking)
-    w = _LAY.get_size()[0] / _SCALE
-    return max(0.0, w - tracking)
+    w = max(0.0, _LAY.get_size()[0] / _SCALE - tracking)
+    if len(_TW_CACHE) >= _TW_LIMIT:
+        _TW_CACHE.clear()
+    _TW_CACHE[key] = w
+    return w
 
 
 def _cap(size: float, weight: int = _W_NORMAL) -> float:

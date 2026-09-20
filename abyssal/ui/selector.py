@@ -74,8 +74,8 @@ class BankGeometry:
     def face_rect(self, i: int) -> Rect:
         """The keycap face, where a channel index may be drawn."""
         k = self.key_rect(i)
-        return Rect(k.x + k.w * 0.17, k.y + k.h * 0.22,
-                    k.w * 0.66, k.h * 0.42)
+        return Rect(k.x + k.w * 0.10, k.y + k.h * 0.22,
+                    k.w * 0.80, k.h * 0.42)
 
     @property
     def valid(self) -> bool:

@@ -38,8 +38,11 @@ SEGMENT_HOUSING = NineSlice("frame/segment_housing", 120, 70, 120, 95,
                             87, 48, 87, 69)
 SEGMENT_HOUSING_WIDE = NineSlice("frame/segment_housing_wide", 74, 47, 74, 43,
                                  55, 35, 55, 32)
+# pad_b is the BEVEL only, not the sprite's caption ledge: the caption is drawn
+# below the well, so reserving the ledge internally collapsed the plot area to
+# a few pixels once the border scale kicked in.
 GRAPH_WELL = NineSlice("frame/graph_well", 72, 44, 72, 110,
-                       51, 30, 52, 79)
+                       51, 30, 52, 44)
 METER_TROUGH = NineSlice("frame/meter_trough", 53, 31, 53, 42,
                          39, 23, 39, 31)
 AUX_FRAME = NineSlice("frame/aux_frame", 74, 50, 74, 111,

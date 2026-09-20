@@ -37,6 +37,7 @@ class Species:
     cls: str                 # class
     origin: str              # origin
     short: str               # engraved on the selector key
+    morphology: str          # morphology word for the observation field
     symmetry: str            # symmetry description
     notes: str               # short archive note
     response: str            # behavioural mapping summary
@@ -50,6 +51,7 @@ class Species:
 CATALOGUE: tuple[Species, ...] = (
     Species(
         key="quadrilobata",
+        morphology="QUADRILOBATE",
         short="QUADRI",
         name="PLUMIRADIA QUADRILOBATA",
         epithet="THE QUARTERED PLUME",
@@ -63,6 +65,7 @@ CATALOGUE: tuple[Species, ...] = (
     ),
     Species(
         key="trispira",
+        morphology="HELICATE",
         short="TRISPIRA",
         name="HELICORADIA TRISPIRA",
         epithet="THE SPIRALLED TRINE",
@@ -76,6 +79,7 @@ CATALOGUE: tuple[Species, ...] = (
     ),
     Species(
         key="pentafida",
+        morphology="CILIATE",
         short="PENTA",
         name="CILIARADIA PENTAFIDA",
         epithet="THE FIVEFOLD CILIUM",
@@ -89,6 +93,7 @@ CATALOGUE: tuple[Species, ...] = (
     ),
     Species(
         key="hexastoma",
+        morphology="UMBELLATE",
         short="HEXA",
         name="UMBELLIRADIA HEXASTOMA",
         epithet="THE HEXATE UMBEL",
@@ -102,6 +107,7 @@ CATALOGUE: tuple[Species, ...] = (
     ),
     Species(
         key="bifida",
+        morphology="FLAGELLATE",
         short="BIFIDA",
         name="VIBRISSARADIA BIFIDA",
         epithet="THE CLEFT VIBRISSA",

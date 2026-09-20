@@ -210,7 +210,7 @@ def gate7_switching() -> tuple[bool, list[str]]:
         if org.time < clocks[idx] - 1e-12:
             bad.append(f"specimen {idx}: clock went backwards at step {step}")
         clocks[idx] = org.time
-        console.draw_under(cr, L, model)
+        console.draw_under(cr, L, model, 0.4)
         console.draw_over(cr, L, FAKE, 60.0, 16.6, model, light)
         if not (math.isfinite(org.core_r) and org.fil_x.min() > -1e6):
             bad.append(f"specimen {idx}: non-finite state at step {step}")
@@ -240,7 +240,7 @@ def gate7_switching() -> tuple[bool, list[str]]:
             model.active = i
             model.species = by_index(i)
             try:
-                console.draw_under(c2, LL, model)
+                console.draw_under(c2, LL, model, 0.4)
                 console.draw_over(c2, LL, FAKE, 60.0, 16.6, model, light)
             except Exception as exc:                      # pragma: no cover
                 bad.append(f"{ww}x{hh} specimen {i}: {exc!r}")

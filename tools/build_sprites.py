@@ -279,6 +279,35 @@ def build_state_strip(src: str, out_dir: str, names: list[str], width: int) -> N
         _save(cell, f"{out_dir}/{name}.png")
 
 
+def build_parts() -> None:
+    """Split the kit sheets into individually placeable parts.
+
+    The chassis is bolted together at runtime, so it needs a screw it can put
+    at a corner and a rail it can run down a side - not a contact sheet. These
+    come from the already-approved kits; no new generation.
+    """
+    print("parts:")
+    fast = ["screw_large", "screw_small", "rivet", "tab", "bracket", "handle"]
+    ctrl = ["knob", "toggle", "guarded", "selector_rotary", "rocker", "button"]
+    for src, names, w in (("fasteners/fastener_kit_2k.png", fast, 128),
+                          ("controls/control_kit_2k.png", ctrl, 128)):
+        im = _load(src)
+        rows = _row_runs(_alpha(im), min_h=int(im.height * 0.06))
+        if len(rows) != 2:
+            raise SystemExit(f"{src}: expected 2 rows, found {len(rows)}")
+        k = 0
+        for ry0, ry1 in rows:
+            band = im.crop((0, ry0, im.width, ry1))
+            cols = _col_runs(_alpha(band), min_w=int(im.width * 0.03))
+            if len(cols) != 3:
+                raise SystemExit(f"{src}: expected 3 per row, found {len(cols)}")
+            for cx0, cx1 in cols:
+                cell = band.crop((cx0, 0, cx1, band.height))
+                bx0, by0, bx1, by1 = _bbox(_alpha(cell))
+                _save(cell.crop((bx0, by0, bx1, by1)), f"part/{names[k]}.png", w)
+                k += 1
+
+
 def build_controls() -> None:
     print("mode key:")
     build_state_strip("controls/mode_key_states_2k.png", "mode",
@@ -302,6 +331,7 @@ def main() -> int:
     build_frames()
     build_plates()
     build_annunciators()
+    build_parts()
     build_selector()
     build_controls()
     total = sum(p.stat().st_size for p in OUT.rglob("*.png"))

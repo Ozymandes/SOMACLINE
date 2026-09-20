@@ -53,6 +53,14 @@ _MAX_SCALED = 64
 #: becomes two touching borders and a two-pixel slit of glass.
 MIN_MIDDLE_SHARE = 0.34
 
+#: Floor on the proportional border scale. A 9-sliced border is authored at the
+#: sprite's own size; drawn far below it, a border that stayed 1:1 would eat the
+#: aperture - the observation bezel is authored 1280x900 with 178px of metal
+#: vertically, which at a 489px stage is 36% of the field. Borders therefore
+#: scale by how far below its authored size the panel is drawn, using ONE
+#: factor for both axes so corners stay square and no screw is ovalised.
+MIN_BORDER_SCALE = 0.45
+
 _base: dict[str, cairo.ImageSurface | None] = {}
 _scaled: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
 _stats = {"loads": 0, "hits": 0, "misses": 0, "missing": 0}
@@ -175,15 +183,20 @@ def _shrink(ns: "NineSlice", w: float, h: float) -> tuple[float, float]:
     the app believe the glass starts somewhere the metal is still being
     painted, which is how a shrunken bezel ends up covering its own viewport.
     """
-    kx = ky = 1.0
-    lr = ns.left + ns.right
-    tb = ns.top + ns.bottom
+    sw, sh = sprite_size(ns.name)
+    if sw > 0 and sh > 0:
+        k = min(w / float(sw), h / float(sh))
+        kx = ky = max(MIN_BORDER_SCALE, min(1.0, k))
+    else:
+        kx = ky = 1.0
+    lr = (ns.left + ns.right) * kx
+    tb = (ns.top + ns.bottom) * ky
     max_lr = w * (1.0 - MIN_MIDDLE_SHARE)
     max_tb = h * (1.0 - MIN_MIDDLE_SHARE)
     if lr > max_lr and lr > 0:
-        kx = max(0.0, max_lr / lr)
+        kx *= max(0.0, max_lr / lr)
     if tb > max_tb and tb > 0:
-        ky = max(0.0, max_tb / tb)
+        ky *= max(0.0, max_tb / tb)
     return (kx, ky)
 
 
@@ -337,6 +350,35 @@ def draw_sprite_fit(cr: cairo.Context, name: str,
     w, h = sw * k, target_h
     draw_sprite(cr, name, cx - w / 2.0, cy - h / 2.0, w, h, alpha)
     return (w, h)
+
+
+def draw_sprite_rot90(cr: cairo.Context, name: str,
+                      x: float, y: float, w: float, h: float,
+                      alpha: float = 1.0) -> bool:
+    """Draw a sprite rotated a quarter turn, filling (x, y, w, h).
+
+    The handle rails on the reference chassis run VERTICALLY down the side
+    members, but the part was generated horizontally. Rotating at draw time
+    beats generating a second asset that would only drift from the first.
+    """
+    src = sprite(name)
+    if src is None or w < 1 or h < 1:
+        return False
+    cr.save()
+    cr.translate(x + w, y)
+    cr.rotate(1.5707963267948966)
+    # after the rotation the sprite's own width runs down the screen
+    surf = _scaled_sprite(name, int(round(h)), int(round(w)))
+    if surf is None:
+        cr.restore()
+        return False
+    cr.set_source_surface(surf, 0, 0)
+    if alpha >= 0.999:
+        cr.paint()
+    else:
+        cr.paint_with_alpha(max(0.0, alpha))
+    cr.restore()
+    return True
 
 
 def fit_box(name: str, box_w: float, box_h: float) -> tuple[float, float]:
