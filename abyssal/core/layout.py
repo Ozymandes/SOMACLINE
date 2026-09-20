@@ -147,6 +147,8 @@ SIDE_COLUMN_ASPECT = 1.45
 # that. It lives here as a constant because layout may not import ui.
 _BANK_ASPECT = 5.313
 _BANK_SHARE = 1.00          # of stage width: the trough spans the bezel
+#: Seam between the observation bezel and the selector trough, in px.
+_BANK_SEAM = 3.0
 _BANK_MIN_H = 34.0
 _BANK_MAX_H = {"COMPACT": 78.0, "INSTRUMENT": 114.0, "ARCHIVE": 152.0}
 _FOOTER_H = {"COMPACT": 0.0, "INSTRUMENT": 44.0, "ARCHIVE": 68.0}
@@ -255,10 +257,14 @@ def resolve(width: float, height: float) -> Layout:
 
     # --- selector bank, carved from the stage column -----------------------
     bank_h = bank_height(state, stage.w, stage.h * 0.30)
-    if bank_h > 0.0 and stage.h - bank_h - gap * 0.5 >= m["min_stage"]:
+    # The selector trough is BOLTED TO the observation bezel, not parked below
+    # it. A generous gap made the two read as separate objects that happened
+    # to be stacked; a hairline reads as one assembly, and the trough draws
+    # its own transition lip into that seam.
+    if bank_h > 0.0 and stage.h - bank_h - _BANK_SEAM >= m["min_stage"]:
         controls = Rect(stage.x, stage.bottom - bank_h, stage.w, bank_h)
         stage = Rect(stage.x, stage.y, stage.w,
-                     max(0.0, stage.h - bank_h - gap * 0.5))
+                     max(0.0, stage.h - bank_h - _BANK_SEAM))
         show_controls = True
     else:
         controls = Rect(0.0, 0.0, 0.0, 0.0)

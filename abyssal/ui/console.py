@@ -43,7 +43,8 @@ from ..core.lighting import CHARTREUSE as L_CHART
 from ..core.lighting import CYAN as L_CYAN
 from ..core.lighting import LightField
 from ..core.signals import Telemetry
-from ..core.theme import AMBER, CYAN, INK, INK_BRIGHT, INK_DIM, LIME, RULE, rgba
+from ..core.theme import (AMBER, CYAN, INK, INK_BRIGHT, INK_DIM, INK_TECH,
+                          LIME, RULE, rgba)
 from ..organism.species import CATALOGUE, Species
 from ..skin import catalog as C
 from ..skin import fascia as F
@@ -493,9 +494,18 @@ def _hairline(cr, x0: float, x1: float, y: float, rgb=RULE,
 def _draw_chassis(cr, L: Layout) -> None:
     """The outer enclosure: the thing that makes this read as ONE machine.
 
-    Assembled, not stretched: a plate for the body, a real slotted screw sunk
-    at each corner, and a handle rail run down each side member - exactly the
-    parts the reference console is built from.
+    NO CORNER FASTENERS ARE DRAWN HERE.
+    ----------------------------------
+    The panels bolted to this enclosure carry their own. The header fascia has
+    a screw at each of its four corners, the archive rail has four more, the
+    observation bezel has four, and every telemetry module shell has four.
+    Adding a programmatic screw at each chassis corner put a third fastener
+    within ~40px of two real ones, in a vertical line - which is precisely
+    what made the machine read as composited rather than manufactured.
+
+    An enclosure whose panels are visibly bolted down does not also need its
+    own corners bolted to nothing. What is left here is what the chassis
+    genuinely is: a machined plate and a handle rail down each side member.
     """
     c = L.chassis
     if not L.show_chassis or not c.valid:
@@ -504,13 +514,6 @@ def _draw_chassis(cr, L: Layout) -> None:
 
     wall = max(10.0, min(c.w, c.h) * 0.020)
     inset = wall * 0.78
-    scr = min(wall * 1.55, 30.0)
-    for sx, sy in ((c.x + inset, c.y + inset),
-                   (c.right - inset, c.y + inset),
-                   (c.x + inset, c.bottom - inset),
-                   (c.right - inset, c.bottom - inset)):
-        draw_sprite_fit(cr, "part/screw_large", sx, sy, scr)
-
     rail_h = c.h * 0.42
     rail_w = min(wall * 0.62, 15.0)
     if rail_h > 60.0 and rail_w > 4.0:
@@ -625,7 +628,7 @@ def bay_line(cr, r: Rect, text: str, size: float, weight: int, tracking: float,
 
 
 def bay_pair(cr, r: Rect, key: str, value: str, size: float, t,
-             value_rgb=INK_BRIGHT, key_rgb=INK_DIM, alpha: float = 1.0,
+             value_rgb=INK_BRIGHT, key_rgb=INK_TECH, alpha: float = 1.0,
              baseline: float | None = None) -> None:
     """A KEY / VALUE pair sharing one bay line: key left, value right of it.
 
@@ -637,7 +640,7 @@ def bay_pair(cr, r: Rect, key: str, value: str, size: float, t,
     sz = max(MIN_TEXT, size)
     base = baseline if baseline is not None else (r.cy + _cap(sz) * 0.5)
     kw = _show(cr, key, sz, _W_NORMAL, t.tracking, r.x, base, key_rgb,
-               0.86 * alpha, "l", r.w * 0.62)
+               0.92 * alpha, "l", r.w * 0.62)
     vx = r.x + kw + sz * 0.85
     if r.right - vx > sz:
         bay_line(cr, Rect(vx, r.y, r.right - vx, r.h), value, sz, _W_MEDIUM,
@@ -744,19 +747,22 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
             bay_line(cr, b, sp.epithet, sub_sz, _W_NORMAL, t.tracking * 1.5,
                      INK_BRIGHT, 0.94, "c", top + _cap(sub_sz))
             bay_line(cr, b, "BIOCOMPUTATIONAL OBSERVATION TERMINAL", micro_sz,
-                     _W_NORMAL, t.tracking, INK_DIM, 0.74, "c",
+                     _W_NORMAL, t.tracking, INK_TECH, 0.82, "c",
                      top + _cap(sub_sz) * 1.28 + _cap(micro_sz) * 1.40)
 
     # --- bay 3: the LIVE annunciator, in the boss the asset provides ------
     lamp = P.bay("live_lamp") if static else Rect(0, 0, 0, 0)
     win = P.bay("live_window") if static else Rect(0, 0, 0, 0)
     if lamp.valid:
-        d = min(lamp.h, lamp.w) * 1.06
+        # The boss is cast into the fascia, so the lamp is sized to the boss
+        # and centred in it - never to the bay, which is wider than the boss
+        # and was seating the lamp a few pixels left of its own housing.
+        d = min(lamp.h, lamp.w) * 0.94
         draw_sprite_fit(cr, C.lamp("small", "nominal"), lamp.cx, lamp.cy, d)
-        light.add(lamp.cx, lamp.cy, d * 2.4, L_CHART, 0.20)
+        light.add(lamp.cx, lamp.cy, d * 2.2, L_CHART, 0.18)
     if win.valid:
-        wi = bay_inner(win, sy=0.6)
-        bay_line(cr, wi, "LIVE", min(t.label, wi.h * 0.92), _W_MEDIUM,
+        wi = bay_inner(win, sx=0.8, sy=0.5)
+        bay_line(cr, wi, "LIVE", min(t.label, wi.h * 0.86), _W_MEDIUM,
                  t.tracking, LIME, 0.97, "c")
 
     # --- bay 4: date over the running clock -------------------------------
@@ -764,16 +770,31 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
     # is the one thing here that is NOT cached.
     b = bay_inner(P.bay("clock")) if live else Rect(0, 0, 0, 0)
     if b.valid:
-        dsz = max(MIN_TEXT, min(t.micro * 0.90, b.h * 0.26))
-        dh = min(b.h * 0.56, 22.0)
-        top = b.y + max(0.0, (b.h - (_cap(dsz) * 1.55 + dh)) * 0.5)
-        bay_line(cr, b, time.strftime("%Y-%m-%d"), dsz, _W_NORMAL, t.tracking,
-                 INK_DIM, 0.80, "r", top + _cap(dsz))
-        cw = SEG.measure(time.strftime("%H:%M:%S"), dh, SEG.CYAN)
-        if cw > b.w:
-            dh *= b.w / cw
-        SEG.draw_right(cr, time.strftime("%H:%M:%S"), b.right,
-                       top + _cap(dsz) * 1.55, dh, SEG.CYAN)
+        # Date and time on ONE optical line, as the reference console has
+        # them: a stacked date reads as a second, competing readout, and at
+        # this bay height it left the clock crowding the recess floor.
+        date = time.strftime("%Y-%m-%d")
+        clk = time.strftime("%H:%M:%S")
+        dh = min(b.h * 0.86, 24.0)
+        dsz = max(MIN_TEXT, min(t.micro * 0.94, dh * 0.50))
+        gap = dsz * 1.1
+        cw = SEG.measure(clk, dh, SEG.CYAN)
+        dw = _text_w(date, dsz, _W_NORMAL, t.tracking)
+        if cw + gap + dw > b.w:
+            # The clock is the readout; the date yields before it shrinks.
+            k = (b.w - gap - dw) / max(cw, 1.0)
+            if k < 0.62:
+                date, dw, gap = "", 0.0, 0.0
+                dh = min(dh, b.w / max(SEG.measure(clk, 1.0, SEG.CYAN), 1e-6))
+            else:
+                dh *= k
+                cw = SEG.measure(clk, dh, SEG.CYAN)
+        base = b.cy + _cap(dsz) * 0.5
+        if date:
+            _show(cr, date, dsz, _W_NORMAL, t.tracking,
+                  b.right - SEG.measure(clk, dh, SEG.CYAN) - gap, base,
+                  INK_TECH, 0.82, "r")
+        SEG.draw_right(cr, clk, b.right, b.cy - dh * 0.5, dh, SEG.CYAN)
         light.glow(b, L_CYAN, 0.055, spread=0.55)
 
     if static:
@@ -1075,13 +1096,13 @@ def _field_block(cr, x: float, y: float, w: float, rows, t,
             if align_r:
                 _show(cr, k + ":", sz, _W_NORMAL, t.tracking,
                       x + w - (0.0 if wide else keyw + sz * 0.6), base,
-                      INK_DIM, 0.80 * alpha, "r", w)
+                      INK_TECH, 0.86 * alpha, "r", w)
                 _show(cr, v, sz, _W_MEDIUM, t.tracking * 0.6, x + w,
                       base + (line if wide else 0.0), INK, 0.92 * alpha, "r",
                       w if wide else (w - keyw))
             else:
                 _show(cr, k + ":", sz, _W_NORMAL, t.tracking, x, base,
-                      INK_DIM, 0.80 * alpha, "l", w if wide else keyw)
+                      INK_TECH, 0.86 * alpha, "l", w if wide else keyw)
                 _show(cr, v, sz, _W_MEDIUM, t.tracking * 0.6,
                       x + (0.0 if wide else keyw),
                       base + (line if wide else 0.0), INK, 0.92 * alpha, "l",
@@ -1409,14 +1430,14 @@ def _draw_graph_frame(cr, bay: Rect, ch: _Channel, t,
             yy = plot.y + (plot.h - _cap(sz)) * (i / (len(ch.axis) - 1.0)) \
                 + _cap(sz)
             _show(cr, lab, sz, _W_NORMAL, t.tracking, plot.x - sz * 0.7, yy,
-                  INK_DIM, 0.76 * alpha, "r")
+                  INK_TECH, 0.82 * alpha, "r")
     _graticule(cr, plot, alpha=alpha)
     if ledge > 0.0:
         base = r.bottom - ledge * 0.14
         _show(cr, ch.caption, sz, _W_NORMAL, t.tracking, r.x, base,
-              INK_DIM, 0.76 * alpha, "l", r.w * 0.62)
+              INK_TECH, 0.84 * alpha, "l", r.w * 0.62)
         _show(cr, ch.span, sz, _W_NORMAL, t.tracking, r.right, base,
-              INK_DIM, 0.62 * alpha, "r", r.w * 0.34)
+              INK_TECH, 0.66 * alpha, "r", r.w * 0.34)
 
 
 def _draw_graph_live(cr, bay: Rect, ch: _Channel, t, vals: list[float],
@@ -1508,8 +1529,8 @@ def _draw_status_column(cr, bay: Rect, ch: _Channel, t, rows, style,
     sz = max(MIN_TEXT, min(t.micro * 0.86, line * 0.60))
     for j, (k, v) in enumerate(pairs):
         base = top.y + line * j + (line + _cap(sz)) * 0.5
-        kw = _show(cr, k, sz, _W_NORMAL, t.tracking, top.x, base, INK_DIM,
-                   0.82 * alpha, "l", top.w * 0.60)
+        kw = _show(cr, k, sz, _W_NORMAL, t.tracking, top.x, base, INK_TECH,
+                   0.86 * alpha, "l", top.w * 0.60)
         vx = top.x + kw + sz * 0.55
         if top.right - vx > sz:
             bay_line(cr, Rect(vx, top.y, top.right - vx, line), v, sz,
@@ -1521,7 +1542,7 @@ def _draw_status_column(cr, bay: Rect, ch: _Channel, t, rows, style,
     vsz = max(MIN_TEXT, min(t.micro * 0.98, sb.h * 0.52))
     _hairline(cr, sb.x, sb.right, sb.y + 0.5, RULE, 0.55 * alpha)
     _show(cr, state_k, ksz, _W_NORMAL, t.tracking, sb.x,
-          sb.y + _cap(ksz) * 1.55, INK_DIM, 0.80 * alpha, "l", sb.w)
+          sb.y + _cap(ksz) * 1.55, INK_TECH, 0.84 * alpha, "l", sb.w)
     bay_line(cr, Rect(sb.x, sb.y, sb.w, sb.h), state_v, vsz, _W_MEDIUM,
              t.tracking * 0.4, style.lit, 0.98 * alpha, "r",
              sb.bottom - _cap(vsz) * 0.30, x=sb.right)
@@ -1584,7 +1605,7 @@ def _module_static(w: int, h: int, ch: _Channel, idx: int,
         if tb.right - sx > tsz * 3.0:
             ssz = max(MIN_TEXT, min(t.micro * 0.86, tb.h * 0.62))
             bay_line(c2, Rect(sx, tb.y, tb.right - sx, tb.h), ch.sub, ssz,
-                     _W_NORMAL, t.tracking, INK_DIM, 0.72, "r", base,
+                     _W_NORMAL, t.tracking, INK_TECH, 0.80, "r", base,
                      x=tb.right)
 
     _draw_graph_frame(c2, P.bay("graph"), ch, t)
@@ -1872,46 +1893,76 @@ def _draw_controls(cr, L: Layout, m: ConsoleModel, light: LightField,
         _draw_controls_live(cr, L, m, light, geo, mode)
         return
 
-    # --- 1 + 2. the trough, floored in gunmetal ----------------------------
-    # One channel, full bezel width, with a MACHINED METAL FLOOR rather than a
-    # black field. A dark rectangle behind the keys was exactly the "PNGs on a
-    # background" read this mounting exists to remove, and it left the ends of
-    # the row looking like an unfinished cut-out.
+    # --- 1 + 2. the trough, cut INTO the console's lower board -------------
+    # This is a channel milled into the same board the observation bezel is
+    # mounted on, not a dark panel laid underneath it. The order below is the
+    # order a machinist would see it in: the board face, then the cut, then
+    # the shadow the cut throws, then the floor at the bottom of it.
     rail = trough
     if trough.valid:
-        wall = max(2.0, trough.h * 0.055)
-        rail = trough.inset(wall * 0.9, wall * 0.75)
+        wall = max(2.5, trough.h * 0.062)
+        rail = trough.inset(wall * 1.25, wall * 0.95)
         cr.save()
-        g = cairo.LinearGradient(trough.x, trough.y, trough.x, trough.bottom)
-        g.add_color_stop_rgba(0.0, 0.052, 0.056, 0.060, 1.0)
-        g.add_color_stop_rgba(1.0, 0.088, 0.094, 0.100, 1.0)
-        cr.set_source(g)
+        # (a) the lower board: the SAME metal as the chassis around it, so the
+        #     trough is a feature of a surface rather than an object on one.
+        # The board is a structural member let INTO the enclosure, so it
+        # terminates against the chassis side walls rather than lying across
+        # them. Without the clamp it sat on top of the frame and the handle
+        # rail, which reads as a panel dropped on the machine.
+        lo, hi = trough.x - wall * 2.2, trough.right + wall * 2.2
+        if L.show_chassis and L.chassis.valid:
+            cw = max(10.0, min(L.chassis.w, L.chassis.h) * 0.020)
+            lo = max(lo, L.chassis.x + cw)
+            hi = min(hi, L.chassis.right - cw)
+        board = Rect(lo, trough.y - wall * 1.4, max(0.0, hi - lo),
+                     trough.h + wall * 2.4)
+        gb = cairo.LinearGradient(board.x, board.y, board.x, board.bottom)
+        gb.add_color_stop_rgba(0.0, 0.300, 0.308, 0.310, 1.0)
+        gb.add_color_stop_rgba(0.35, 0.248, 0.256, 0.260, 1.0)
+        gb.add_color_stop_rgba(1.0, 0.196, 0.203, 0.208, 1.0)
+        cr.set_source(gb)
+        cr.rectangle(board.x, board.y, board.w, board.h)
+        cr.fill()
+        # (b) the transition lip: the seam the bezel above seats against
+        cr.set_line_width(1.0)
+        cr.set_source_rgba(0.74, 0.78, 0.80, 0.34)
+        cr.move_to(board.x, board.y + 0.5)
+        cr.line_to(board.right, board.y + 0.5)
+        cr.stroke()
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.42)
+        cr.move_to(board.x, board.bottom - 0.5)
+        cr.line_to(board.right, board.bottom - 0.5)
+        cr.stroke()
+        # (c) the cut, and the shadow its upper wall throws into the channel
+        gc = cairo.LinearGradient(trough.x, trough.y, trough.x, trough.bottom)
+        gc.add_color_stop_rgba(0.0, 0.030, 0.033, 0.036, 1.0)
+        gc.add_color_stop_rgba(0.30, 0.062, 0.066, 0.070, 1.0)
+        gc.add_color_stop_rgba(1.0, 0.108, 0.114, 0.120, 1.0)
+        cr.set_source(gc)
         cr.rectangle(trough.x, trough.y, trough.w, trough.h)
         cr.fill()
-        # floor
+        # (d) the floor
         g2 = cairo.LinearGradient(rail.x, rail.y, rail.x, rail.bottom)
-        g2.add_color_stop_rgba(0.0, 0.158, 0.165, 0.170, 1.0)
-        g2.add_color_stop_rgba(0.55, 0.120, 0.127, 0.133, 1.0)
-        g2.add_color_stop_rgba(1.0, 0.086, 0.092, 0.098, 1.0)
+        g2.add_color_stop_rgba(0.0, 0.150, 0.157, 0.162, 1.0)
+        g2.add_color_stop_rgba(0.55, 0.116, 0.123, 0.129, 1.0)
+        g2.add_color_stop_rgba(1.0, 0.084, 0.090, 0.096, 1.0)
         cr.set_source(g2)
         cr.rectangle(rail.x, rail.y, rail.w, rail.h)
         cr.fill()
-        cr.set_line_width(1.0)
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.60)
-        cr.move_to(trough.x, trough.y + 0.5)
-        cr.line_to(trough.right, trough.y + 0.5)
-        cr.stroke()
-        cr.set_source_rgba(0.66, 0.70, 0.72, 0.26)
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.55)
         cr.move_to(rail.x, rail.y + 0.5)
         cr.line_to(rail.right, rail.y + 0.5)
-        cr.move_to(trough.x, trough.bottom - 0.5)
-        cr.line_to(trough.right, trough.bottom - 0.5)
+        cr.stroke()
+        cr.set_source_rgba(0.70, 0.74, 0.76, 0.24)
+        cr.move_to(rail.x, rail.bottom - 0.5)
+        cr.line_to(rail.right, rail.bottom - 0.5)
         cr.stroke()
         cr.restore()
-        scr = min(trough.h * 0.15, 12.0)
+        # (e) end terminations: the channel is bolted down where it stops
+        scr = min(trough.h * 0.16, 13.0)
         if scr > 5.0 and trough.w > 280.0:
-            for sx in (trough.x + scr * 1.0, trough.right - scr * 1.0):
-                draw_sprite_fit(cr, "part/screw_small", sx, trough.cy, scr)
+            for sx in (board.x + scr * 1.05, board.right - scr * 1.05):
+                draw_sprite_fit(cr, "part/screw_small", sx, board.cy, scr)
 
     # --- 3. divider ribs between key stations ------------------------------
     for i in range(geo.n - 1):

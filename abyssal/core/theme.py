@@ -14,8 +14,21 @@ ABYSS_DEEP   = _h("03040 7".replace(" ", ""))
 FRAME        = _h("0d131c")   # dark blue-black framing
 RULE         = _h("17202c")   # hairlines
 
-# Ink
-INK_DIM      = _h("4a5c६e".replace("६", "6"))
+# Ink, in four ranks. The rank carries the meaning, so a label's importance
+# is legible before it is read - and so "dim" never has to mean "guess".
+#
+#   INK_BRIGHT   primary      names, values, headings
+#   INK          body         readings and ordinary text
+#   INK_TECH     secondary    technical microtype: subsystem descriptors,
+#                             axis values, captions, field keys
+#   INK_DIM      tertiary     dormant, structural, or deliberately quiet
+#
+# INK_TECH is drawn from the same pale blue family as the segment displays,
+# at a luminance that stays clearly readable against a dark recess without
+# competing with the values above it. Before this rank existed, secondary
+# descriptors sat on INK_DIM and simply could not be read.
+INK_DIM      = _h("4a5c6e")   # tertiary / dormant
+INK_TECH     = _h("8ab4cc")   # secondary technical microtype (clock family)
 INK          = _h("8fa6bd")   # body text
 INK_BRIGHT   = _h("d6e6f2")   # headings / values
 CYAN         = _h("7fd4e8")   # organism core accent
