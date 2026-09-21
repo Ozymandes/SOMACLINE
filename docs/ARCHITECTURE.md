@@ -383,3 +383,76 @@ actually matters and holds for any body plan: projecting the body through the
 viewport and unprojecting it must be the identity. Any anisotropy, rounding or
 centre drift shows up as a non-zero residual. Measured residual across twenty
 sizes: `< 9e-13` world units.
+
+---
+
+# Final convergence pass
+
+## The organisms are their source equations
+
+`organism/sources.py` · `organism/mathforms.py` · `organism/pointfield.py`
+
+The previous pass reconstructed five body plans from the engraved selector
+keys. They are replaced by the published p5.js sketches the keys depict,
+ported verbatim — same variable names, operator order, constants, loop bounds,
+and the render loop's global `i` where the source reads it. The full
+transcriptions and the checks made against them are in
+`docs/CREATURE_EQUATIONS.md`.
+
+Three layers, each with one job:
+
+    sources.py     the equation, untouched, in its own 400x400 canvas
+    mathforms.py   a clock in real seconds, a seat in the world (one
+                   translation, one uniform scale), and physiology
+    pointfield.py  counting ten to forty thousand points into pixels
+
+**Why a point field.** The sources composite every sample additively at a low
+alpha; where the equation crowds the plane the image brightens, and that
+density is the creature's volume. Forty thousand Cairo arcs a frame would
+cost about a second. `np.bincount` over a flat pixel index is one C pass.
+
+**Bounded cost.** The field buffer covers only the creature's own disc, not
+the stage, and above 760px it is counted at that size and scaled once on the
+blit. At 2560×1600 this took the organism from 74ms to 7ms.
+
+**Persistence in seconds.** One source composites with `background(6,96)` —
+a translucent wash, so each frame keeps 62% of the last. That rate is per
+frame at 60fps; applied per frame at 30fps the trail smears across twice the
+motion. Retention is raised to the frame's own duration so the trail stays
+~75ms at any frame rate, and the ink gain divides out its steady-state
+brightness so a trailing species is not brighter than a clearing one.
+
+**Physiology never edits an equation.** It acts on the solved point cloud,
+and every term is proportional to its own channel, so at rest each specimen
+is exactly its source. GATE 4 compares the specimen at rest against the raw
+equation solved with no body at all.
+
+## A crash only the live gate could see
+
+The point field first reused one cairo surface, rewriting its pixels each
+frame. GSK keeps a snapshot of whatever it last painted, and Cairo aborts the
+process if a snapshotted surface is marked dirty. An offscreen ImageSurface
+never snapshots its sources, so every headless gate passed and the real
+window died within a second. GATE 0 — the Hyprland torture harness — caught
+it. The output image is now allocated per frame from `np.empty` (no memset);
+the accumulator and scratch, which only NumPy touches, stay cached.
+
+## The observation zones clear the specimen, not just the axis
+
+Each corner zone is clamped so its inner corner stays outside the specimen's
+disc — the circle solved at the zone's own edge, so a short block at the top
+may run further toward the axis than a tall one. Zones also carry a height
+budget that keeps them off the horizontal axis. A reading that cannot be
+shown whole is dropped rather than ellipsised; a key that would crowd the
+table goes key-over-value rather than being cut.
+
+## Hardware finish
+
+- **No programmatic chassis corner screws.** The header fascia, archive rail,
+  observation bezel and every module shell carry their own fasteners; a third
+  screw at each chassis corner sat within ~40px of two real ones.
+- **INK_TECH**, a fourth ink rank in the clock-blue family, for secondary
+  technical microtype that previously sat on INK_DIM and could not be read.
+- **The selector is milled into a lower board** of chassis metal, seamed to
+  the bezel at 3px, with a shadowed upper wall, a floor, and screws where it
+  terminates against the side members. No new assets were generated.

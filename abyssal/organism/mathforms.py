@@ -76,7 +76,7 @@ class SourceBody:
     """One specimen. Solves its equation each frame into world coordinates."""
 
     __slots__ = ("src", "time", "seed", "core_r", "_perm", "_mod2", "_mod4",
-                 "_n", "_x", "_y", "_w", "_live", "_warm", "_expr")
+                 "_n", "_x", "_y", "_w", "_live", "_warm", "_expr", "_dt")
 
     def __init__(self, src: S.Source, seed: int = 20260920) -> None:
         self.src = src
@@ -103,6 +103,7 @@ class SourceBody:
         self._live = src.n
         self._warm = 0.0
         self._expr = 1.0
+        self._dt = 1.0 / SOURCE_FPS
         self.update(0.0, Physiology())
 
     # -- contract ---------------------------------------------------------
@@ -117,10 +118,18 @@ class SourceBody:
 
     @property
     def persist(self) -> float:
-        """Frame retention. Memory pressure lengthens what trails species keep."""
+        """Retention for THIS frame. Memory pressure lengthens the trail.
+
+        The source's retention is per frame at 60 frames a second. Applied per
+        frame on a machine presenting at 30, the trail would smear across twice
+        as much motion and read as a saturated mass. Raising it to the frame's
+        own duration keeps the trail's length constant in SECONDS, which is
+        the thing the eye actually sees.
+        """
         if self.src.persist <= 0.0:
             return 0.0
-        return min(0.88, self.src.persist + 0.16 * self._expr)
+        base = min(0.88, self.src.persist + 0.16 * self._expr)
+        return base ** max(0.25, min(4.0, self._dt * SOURCE_FPS))
 
     def points(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(world x, world y, weight) for this frame."""
@@ -136,6 +145,8 @@ class SourceBody:
         # can never become the whole of a creature's response to load.
         rate = 1.0 + 0.5 * p.agitation
         self.time += dt * SOURCE_FPS * self.src.dt * rate
+        if dt > 0.0:
+            self._dt = dt
 
         self._warm = _smoothstep(0.58, 0.95, p.pulse)
         self._expr = min(1.0, MIN_EXPRESSION

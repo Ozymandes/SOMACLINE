@@ -11,17 +11,21 @@ a bay that was manufactured for it.
 
 ## The catalogue
 
-| # | Specimen | Body plan | Reads |
-|---|---|---|---|
-| 01 | CILIARADIA SIGMATA | sigmoid spine, club-tipped cilia on both flanks | load as beat frequency |
-| 02 | INFUNDIBULA COLONIALIS | three dotted conical bells, trailing tendrils | heat as aperture |
-| 03 | SYMMETRA ROSTRATA | exact mirror plane: rostrum, spiral eyes, eight arms | heat breaks the mirror |
-| 04 | DYADIS CONIUGATA | two bodies — a dense comb and a wandering orbit | I/O as a travelling packet |
-| 05 | PLUMIRADIA FALCATA | one long arcuate rachis under a hood | highest motion sensitivity |
+Each specimen is a published generative sketch — a compact p5.js program —
+ported verbatim to NumPy. The equation on screen is the equation in the
+source; see `docs/CREATURE_EQUATIONS.md`.
 
-They are five different organisms, not one solver with the symmetry order
-changed; `qa/console_gates.py` GATE 4 measures a shape signature for each and
-fails if any two come out similar.
+| # | Specimen | Source | Form | Telemetry reads as |
+|---|---|---|---|---|
+| 01 | PLUMARIA SIGMATA | s01 | sigmoid plume | a ripple down the body |
+| 02 | DIPLOSOMA CONIUGATA | s02 | two coupled bodies | I/O crossing between them |
+| 03 | SYMMETRA ROSTRATA | s03 | mirrored alien | heat breaking the mirror plane |
+| 04 | QUADRIPLUMA ARTICULATA | s04 | four separate plumes | load desynchronising the four |
+| 05 | PENNARIA SOLITARIA | s05 | single feather | a whip growing toward the tip |
+
+At rest every specimen reduces **exactly** to its published equation;
+`qa/console_gates.py` GATE 4 asserts it. Physiology shapes the creature, it
+never replaces it.
 
 ## Requirements
 
@@ -60,6 +64,7 @@ python3 qa/console_gates.py      # GATES 4-8 species, skin, selector, cache
 python3 qa/torture.py --shots    # GATE 0: real Hyprland resize torture test
 python3 qa/offscreen.py out.png --width 1400 --height 880
 python3 qa/specimen_sheet.py catalogue.png
+python3 qa/creature_validate.py  # each equation in its own 400x400 canvas
 python3 -m abyssal.telemetry.source      # live telemetry
 ```
 
@@ -82,9 +87,11 @@ abyssal/
     lighting.py       restrained spill from lit displays
     theme.py          palette and type
   organism/
-    mathforms.py      the five organisms: point equations, world units only
-    species.py        the catalogue: body plan + archive metadata
-    render.py         cairo drawing of any organism
+    sources.py        the five source equations, verbatim + NumPy port
+    mathforms.py      specimens: source clock, world seat, physiology
+    pointfield.py     accumulating point-field rasteriser
+    species.py        the catalogue: source + archive metadata
+    render.py         cairo drawing of any specimen
   telemetry/
     source.py         /proc and /sys sampling, with graceful fallback
   skin/

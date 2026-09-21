@@ -139,6 +139,17 @@ def draw_organism(cr, vp: Viewport, org: SourceBody) -> None:
     # strongly, or the creature fades out as the window grows.
     eff = vp.scale * res
     ink = min(org.src.ink * 0.78 / max(eff * eff * 3.4, 0.02), 3.6)
+    # A trailing species keeps a fraction `r` of every frame, so its
+    # accumulator converges to 1/(1-r) times a single frame's count. Divide
+    # that back out, or the trail - the species' whole character - saturates
+    # into a solid silhouette and the structure inside it is lost.
+    # Square root rather than the full 1-r: the eye reads a soft-knee
+    # composite, not a linear count, so dividing the whole gain out left the
+    # trail a faint ghost. This keeps it as bright as a clearing species
+    # while leaving the structure inside it legible.
+    r = org.persist
+    if r > 0.0:
+        ink *= (1.0 - r) ** 0.5 * 1.55
 
     warm = org.warmth
     lo = _mix(CYAN_DEEP, (0.34, 0.20, 0.06), warm)

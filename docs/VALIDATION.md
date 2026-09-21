@@ -214,3 +214,59 @@ inventory audit, including the two deliberate omissions — the telemetry rack
 (duplicates the module shell's own mounting and would cost ~20% of the graph
 width) and the chassis master (a fixed composition that cannot follow an
 arbitrary window aspect).
+
+
+---
+
+# Final convergence pass — measured results
+
+## Gates
+
+```
+GATE 0 live Hyprland     PASS   62 transitions, 146 resizes, 104 sizes, all
+                                three states, 0 rebuilds, clock monotonic,
+                                worst isotropy 1.1e-13 px
+GATE 1 geometry          PASS   projection is the identity, residual < 1e-12
+GATE 3 performance       PASS   every benched size inside 16.6 ms
+resize invariance        PASS   400 frames at random sizes, |dx| = |dy| = 0
+GATE 4 species           PASS   5 source equations; all reduce EXACTLY to
+                                their source at rest; closest pair 1.01
+                                (floor 0.35); mirror asymmetry 0.14 at rest,
+                                0.85 at the thermal limit
+GATE 5 skin              PASS
+GATE 6 selector          PASS   10 plates, one footprint, 50 hit tests
+GATE 7 switching         PASS   120 switches, no clock rewound
+GATE 8 static layer      PASS   warm vs cold render, max pixel delta 0
+```
+
+## Frame cost (headless, full frame)
+
+```
+=== GATE 3 — PERFORMANCE ===
+         size      sim  organism  console    total  fps_cap
+    420x340      0.25ms     0.15ms    1.75ms    2.15ms     466
+    900x700      0.28ms     0.68ms    3.25ms    4.20ms     238
+   1400x860      0.27ms     0.83ms    4.16ms    5.26ms     190
+   1920x1080     0.27ms     1.75ms    5.99ms    8.02ms     125
+   2560x1600     0.31ms     7.14ms    8.40ms   15.84ms      63
+```
+
+## Source-equation validation
+
+`python3 qa/creature_validate.py` renders each equation in its own 400×400
+canvas with its original sample count, time step and compositing. Output in
+`docs/creature_validation/`; `comparison.png` sets each beside its engraved
+key.
+
+## Known limitations
+
+- **Presented frame rate at large windows.** The app spends ~4.6 ms of its
+  16.6 ms budget; above roughly 1400×880 logical on this 1.6× display the
+  compositor presents at half rate. The FRAME / RENDER module reports that
+  truthfully. Tiled at the canonical size it presents at 78–80 fps.
+- **Source 05's orientation.** The equation draws its bulb at the lower end
+  of the rachis; the engraved key shows it at the top. The equation is
+  authoritative, so it is not flipped.
+- **Coordinates are planar.** The specimen field is 2-D, so the VECTOR FIELD
+  zone reports x and y; z was always zero and cost the width that let the
+  reading be shown whole.

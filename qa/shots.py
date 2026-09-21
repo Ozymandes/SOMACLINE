@@ -13,10 +13,10 @@ import json  # noqa: E402
 SHOTS = [("compact", 460, 380, []), ("instrument", 900, 700, []),
          ("instrument-tall", 760, 620, []), ("archive", 1400, 880, []),
          ("calibration", 900, 700, ["--calibration"]),
-         ("specimen-2-funnelis", 1400, 880, ["--specimen", "1"]),
-         ("specimen-3-symmetra", 1400, 880, ["--specimen", "2"]),
-         ("specimen-4-dyad", 1400, 880, ["--specimen", "3"]),
-         ("specimen-5-frond", 1400, 880, ["--specimen", "4"])]
+         ("specimen-2-coniugata", 1400, 880, ["--specimen", "1"]),
+         ("specimen-3-rostrata", 1400, 880, ["--specimen", "2"]),
+         ("specimen-4-quadriplex", 1400, 880, ["--specimen", "3"]),
+         ("specimen-5-solitaria", 1400, 880, ["--specimen", "4"])]
 
 #: Close-ups cropped from a captured shot: (source, name, x, y, w, h) as
 #: FRACTIONS of the captured image, so they survive a resolution change.
