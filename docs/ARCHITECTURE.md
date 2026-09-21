@@ -17,7 +17,9 @@ Nothing left of `core/viewport.py` in that chain knows the window exists.
 
 ## Why this stack
 
-GTK4 + Cairo, immediate mode, one `GtkDrawingArea`.
+GTK4 + Cairo, one widget. (Originally a `GtkDrawingArea`; since the final
+production pass a single custom widget that composes with `GtkSnapshot` - see
+"Final production pass" below. The argument in this section still holds.)
 
 The previous prototype was Qt6/QML. Its crashes came from the scene graph:
 `ShaderEffectSource` feedback buffers freed while the render thread still held
@@ -32,6 +34,14 @@ That is a structural guarantee, not a bug fix.
 
 The cost is CPU rasterisation, which is why the organism's point budget is
 capped and measured (see `qa/gates.py`, GATE 3).
+
+*Amended in the final production pass:* the widget now hands GTK immutable
+`GdkMemoryTexture` values for pixels that did not change. That is still not
+persistent rendering state of ours: there is no GL context, framebuffer or
+render thread in this program, a texture is never mutated (a change makes a
+new one), and dropping every texture between two frames changes performance
+only. The Qt failure mode - mutable GPU state outliving the frame that owned
+it - remains structurally impossible.
 
 ## The resize contract
 
@@ -68,10 +78,12 @@ the organism to nothing.
 
 ## Frame loop
 
-`GdkFrameClock` tick -> advance simulation -> `queue_draw`. Simulation runs in
-the tick, rendering in the draw handler; the draw handler is a pure function of
-(simulation state, width, height) and has no side effects. `dt` is clamped so
-an unmapped or occluded window cannot teleport the organism on resume.
+`GdkFrameClock` tick -> (paced) advance simulation -> `queue_draw`. Simulation
+runs in the tick, composition in `snapshot()`; the snapshot is a pure function
+of (simulation state, width, height) and has no side effects. `dt` is clamped
+so an unmapped or occluded window cannot teleport the organism on resume. Ticks
+are paced to 60 FPS focused / 30 unfocused / none while suspended (see
+"Adaptive cadence" below).
 
 ## Diagnostics
 
@@ -456,3 +468,96 @@ table goes key-over-value rather than being cut.
 - **The selector is milled into a lower board** of chassis metal, seamed to
   the bezel at 3px, with a shadowed upper wall, a floor, and screws where it
   terminates against the side members. No new assets were generated.
+
+
+---
+
+# Final production pass
+
+## Six physical modules
+
+The console is manufactured from exactly six generated modules
+(`references/Abbysal_Module_Map.png`): **shell, header, observation chamber,
+telemetry rack, selector, status rail**. They are the metal. Everything that
+changes is drawn in code into a recess manufactured for it. The earlier
+component-atlas approach (dozens of small parts assembled per frame) is gone
+from the runtime path; only the approved keys, rocker, mode key and lamps are
+reused as parts.
+
+Inventory, alpha and seating: `assets/modules/INVENTORY.md`. Generation
+ledger: `assets/modules/GENERATIONS.md`.
+
+### Multi-band slicing
+
+A 9-slice has one stretch band per axis; these modules have many
+compartments, and stretching the middle would drag a rib or a screw. Each
+module declares its own stretch bands - intervals that lie inside blank recess
+floors or plain metal - and everything else scales by one uniform factor. Bays
+are mapped through the same piecewise map as the pixels
+(`skin/modules.py::Placed.bay`), so text always lands in its recess.
+
+### Layout from the reference
+
+`core/layout.py` lays the six-module states out from the module rectangles
+measured on `Abbysal_Final.png` (`REF_*`). Vertical positions follow the
+chassis height, horizontal positions its width; the rack is sized from the
+height scale so it keeps its manufactured proportions and the reference's
+36/1368 right margin; the observation column absorbs remaining width up to
+1.62:1, after which the rack takes it. The machine is only used between 0.72
+and 2.2 aspect - beyond that COMPACT, because a 4:3 object there can only be
+letterboxed or smeared.
+
+### Type scales with the machine
+
+The six-module states derive their type scale from the chassis scale,
+measured off the reference (title 18, specimen 26, label 14.5, micro 12.5 px at
+reference size). Every call site still clamps to its own bay. Labels are shown
+whole or in a deliberate short form (`fit_first`), never ellipsised.
+
+## Composition
+
+```
+ layer_under   background, 01 shell, glass, graticule          static texture
+ organism      source equations -> point field, glass only     per-frame cairo node
+ layer_over    03 bezel, 02 header, 04 rack, 05 plate, 06 rail
+               + all static type + constant light              static texture
+ regions       clock | rack readouts | selector keys           texture, re-made on change
+```
+
+A region starts from the static composite of its own rectangle (snapped to
+whole device pixels), so it lands seamlessly on the layers below it. It is
+re-rendered only when its inputs change: the clock once a second, the rack
+when a telemetry sample lands or the displayed FPS changes, the keys on input.
+
+The headless QA path (`console.draw_under/draw_over`) composes exactly the
+same surfaces, so a QA frame is a live frame.
+
+### Device scale
+
+All caches allocate through `skin/hidpi.py` at the display's device scale
+(1.6 on the target desktop) with the scale in their key. Before this pass every
+cache was logical-size and upsampled on blit. The organism point field remains
+logical-resolution: it is soft points, and 2.56x the pixels would cost real CPU
+for no visible gain.
+
+## Adaptive cadence
+
+`app.Monitor.cadence()`:
+
+| window | FPS |
+|---|---|
+| focused | 60 (the panel runs at 120 Hz) |
+| visible, unfocused | 30 |
+| suspended (other workspace, minimised, occluded) | 0 - no simulation, no draw |
+
+Pacing uses a phase accumulator rather than "time since last frame", which
+aliased a 60 FPS target to 40 on a 120 Hz panel.
+
+## Telemetry and history
+
+`/proc` and `/sys` are read at **5 Hz** and only there. Each sample feeds
+`telemetry/history.py`: four preallocated float32 rings of 300 samples (60 s).
+Graphs reduce the ring to one mean per plot column and cache the rendered trace
+per ring version, so a graph is re-stroked 5 times a second, not 60. Scales are
+fixed: CPU 0-100 %, thermal 20-100 C, memory 0-installed GB, frame time
+0-50 ms with the 16.7 ms budget line.

@@ -70,6 +70,32 @@ def measure(pid: int, probe: str, dwell: float) -> dict:
             if len(rows) > 1 else None}
 
 
+def under_cursor(addr: str, w: int, h: int) -> None:
+    """Focus a window and park it under the pointer.
+
+    Hyprland focus follows the mouse: whatever is under the cursor takes
+    focus back as soon as the pointer moves. Parking the window that SHOULD
+    have focus under the pointer makes the focused/unfocused states stick on
+    a desktop that is in use.
+    """
+    try:
+        x, y = (int(float(v)) for v in hypr("cursorpos").replace(",", " ").split())
+    except Exception:
+        x, y = 800, 500
+    focus(addr)
+    dsp(f"hl.dsp.window.move({{ x = {max(0, x - w // 2)}, y = {max(0, y - h // 2)}, exact = true }})")
+    focus(addr)
+
+
+def ensure_size(pid: int, addr: str, w: int, h: int) -> bool:
+    for _ in range(4):
+        focus(addr); dsp(d_resize(w, h)); settle(0.8)
+        c = find_win(pid)
+        if c and abs(c["size"][0] - w) <= 2 and abs(c["size"][1] - h) <= 2:
+            return True
+    return False
+
+
 def launch(args: list[str], out: str) -> subprocess.Popen:
     return subprocess.Popen([sys.executable, "-m", "abyssal.app", *args],
                             cwd=ROOT, stdout=open(out, "w"),
@@ -104,11 +130,13 @@ def main() -> int:
             procs.append(p)
             win = wait_for_window(p.pid)
             focus(win["address"]); dsp(d_float(True)); settle(0.4)
-            focus(win["address"]); dsp(d_resize(w, h)); settle(3.0)
+            if not ensure_size(p.pid, win["address"], w, h):
+                print(f"  WARNING {name}: window did not reach {w}x{h}")
+            settle(2.0)
             res = {"size": [w, h]}
-            focus(win["address"]); settle(1.0)
+            under_cursor(win["address"], w, h); settle(1.0)
             res["focused"] = measure(p.pid, probe, o.dwell)
-            focus(sw["address"]); settle(1.0)
+            under_cursor(sw["address"], 320, 260); settle(1.0)
             res["unfocused"] = measure(p.pid, probe, o.dwell)
             dsp(f"hl.dsp.focus({{ workspace = '{o.workspace - 1}' }})")
             settle(1.0)

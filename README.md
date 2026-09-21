@@ -4,10 +4,12 @@ A biocomputational observation console for Linux. Five procedural specimens
 live behind its glass, each a different set of point equations, and their
 physiology responds to real machine telemetry.
 
-The console itself is built from a bespoke hardware library: a header fascia,
-a module shell, an archive rail and five engraved specimen keys, each with
-its recesses measured off the artwork so that every line of type sits inside
-a bay that was manufactured for it.
+The console is manufactured from six generated hardware modules - shell,
+header, observation chamber, telemetry rack, selector, status rail - matched
+to `references/Abbysal_Final.png` and decomposed per
+`references/Abbysal_Module_Map.png`. The modules are the metal; everything
+that changes is drawn live, in code, into a recess measured off the module.
+Nothing on the machine is a baked reading.
 
 ## The catalogue
 
@@ -44,7 +46,13 @@ third-party Python packages. Telemetry reads `/proc` and `/sys` directly.
 ./run.sh                         # 900x700, the canonical tile
 ./run.sh --debug                 # with the diagnostic overlay on
 ./run.sh --width 1400 --height 860
+./run.sh --qa-temp 86             # QA: substitute the temperature reading
+./run.sh --fps-cap 30             # QA: force a draw rate (default adaptive)
 ```
+
+The monitor draws at up to 60 FPS while focused, 30 while visible but
+unfocused, and not at all on another workspace. Telemetry is sampled at 5 Hz;
+every graph shows the last 60 seconds.
 
 | key | |
 |---|---|
@@ -61,6 +69,10 @@ third-party Python packages. Telemetry reads `/proc` and `/sys` directly.
 ```sh
 python3 qa/gates.py              # GATE 1 geometry + GATE 3 performance
 python3 qa/console_gates.py      # GATES 4-8 species, skin, selector, cache
+python3 qa/production_gates.py   # P1-P12 six-module assets, alpha, seating, cadence
+python3 qa/compare.py OUT        # side-by-side + module deltas vs the reference
+python3 qa/perf_live.py          # real CPU / RSS / FPS, focused/unfocused/hidden
+python3 qa/shots.py              # real-window screenshots (docs/shots)
 python3 qa/torture.py --shots    # GATE 0: real Hyprland resize torture test
 python3 qa/offscreen.py out.png --width 1400 --height 880
 python3 qa/specimen_sheet.py catalogue.png
@@ -94,12 +106,15 @@ abyssal/
     render.py         cairo drawing of any specimen
   telemetry/
     source.py         /proc and /sys sampling, with graceful fallback
+    history.py        bounded 60 s rings for the graphs
   skin/
+    modules.py        THE SIX MODULES: bays, stretch bands, fasteners
+    hidpi.py          device-scale surfaces for every cache
     surface.py        sprite loading, 9-slice, bounded surface cache
-    catalog.py        which sprite, and how it may scale
-    fascia.py         generated panels + the measured bays cut into them
+    catalog.py        approved parts: keys, lamps, rocker, mode key
+    fascia.py         earlier bay-mapped panels (compact fallbacks)
   ui/
-    console.py        the physical console: hardware + live content
+    console.py        the six modules + live content; static layers, regions
     selector.py       the five engraved specimen keys
     segment.py        procedural seven-segment display, with units
     chrome.py         text primitives and the background
@@ -111,9 +126,17 @@ qa/
   specimen_sheet.py   the catalogue as one contact sheet
   torture.py          Hyprland resize torture harness
   shots.py            product screenshots from the real app
+tools/
+  build_modules.py    masters -> runtime modules (alpha, crop, trueing)
+  module_qa.py        alpha / aperture / recess measurement of one PNG
+assets/modules/
+  masters/            the six accepted 2K generations (source of truth)
+  GENERATIONS.md      every Higgsfield generation, settings, references
+  INVENTORY.md        the six modules: size, alpha, apertures, seating
 docs/
-  ARCHITECTURE.md     why this stack, and the resize contract
+  ARCHITECTURE.md     why this stack, the resize contract, composition
   VALIDATION.md       measured results
+  shots/              real-window screenshots + reference comparison
 ```
 
 See `docs/ARCHITECTURE.md` for the resize contract and why the stack was

@@ -270,3 +270,102 @@ key.
 - **Coordinates are planar.** The specimen field is 2-D, so the VECTOR FIELD
   zone reports x and y; z was always zero and cost the width that let the
   reading be shown whole.
+
+---
+
+# Final production pass — measured results
+
+Machine: Omarchy / Hyprland 0.56, 2560×1600 panel at **1.6× scale, 120 Hz**,
+NVIDIA GL. All numbers below were measured, not derived from a frame cap.
+
+## Gates
+
+| gate | result |
+|---|---|
+| GATE 0 live Hyprland torture (62 transitions, 108-resize storm) | **PASS** — sim clock monotonic 0.01→37.22 s, worst isotropy 9.6e-14 px, 0 rebuilds |
+| GATE 1 geometry (17 sizes) | **PASS** |
+| GATE 3 performance (headless) | **PASS** |
+| resize invariance (400 random resizes) | **PASS** — bit-identical |
+| GATES 4–8 species / skin / selector / switching / static layer | **PASS** |
+| P1 six module assets exist | **PASS** |
+| P2 valid alpha | **PASS** — rounded corners alpha 0, master borders ≤ 1 |
+| P3 apertures transparent | **PASS** — 8 apertures, alpha exactly 0 |
+| P4 wells accept the real keys | **PASS** — one size, pitch 200.66 px exact, labels clear |
+| P5 no active-key matte | **PASS** — green lift outside the lit key 2/255 |
+| P6 no baked runtime values | **PASS** — 31 data bays, max luminance 25.5 |
+| P7 no duplicate outer fasteners | **PASS** — nearest cross-module screws 2.2 diameters apart |
+| P8 rack seating | **PASS** — 1.8 px from reference, right margin 35.9 / 36 px |
+| P9 deterministic cache | **PASS** — byte-identical cold renders at 1.0× and 1.6× |
+| P10 bounded history | **PASS** — 4 × 300 samples, 4800 B before and after 20 000 pushes |
+| P11 compact without selector bank | **PASS** |
+| P12 reduced cadence | **PASS** — 60 / 30 / 0 FPS |
+
+## Reference agreement (`qa/compare.py`, 1448×1086)
+
+| module | reference | application | max edge Δ |
+|---|---|---|---|
+| header | 55,55 1340×145 | 55,55 1340×145 | 0.3 px |
+| observation | 52,222 770×568 | 52,222 771×573 | 4.8 px |
+| selector | 52,800 770×152 | 52,805 771×145 | 4.8 px |
+| rack | 838,222 534×730 | 839,222 533×729 | 1.8 px |
+| footer | 48,962 1350×78 | 48,960 1350×78 | 2.0 px |
+
+## Real application resource use (`qa/perf_live.py`, 10 s dwell per state)
+
+CPU is process utime+stime over the dwell; draw is the app's windowed mean
+snapshot time; sim is simulation per frame; tel is one /proc+/sys sample.
+
+| layout | window | CPU % | FPS | draw ms | sim ms | tel ms | RSS MB |
+|---|---|---|---|---|---|---|---|
+| compact 600×480 | focused | 16.2 | 59.9 | 1.05 | 0.52 | 0.36 | 278 |
+| compact | hidden | 1.0 | 0 | – | – | – | 278 |
+| instrument 900×700 | focused | **20.1** | 59.0 | 1.49 | 0.55 | 0.33 | 311 |
+| instrument | unfocused | **11.7** | 30.1 | 1.83 | 0.56 | 0.38 | 313 |
+| instrument | hidden | **0.2** | 0 | – | – | – | 311 |
+| archive 1440×900 | focused | 26.8 | 60.0 | 1.96 | 0.65 | 0.35 | 358 |
+| archive | unfocused | 16.5 | 29.9 | 2.67 | 0.63 | 0.38 | 359 |
+| archive | hidden | 0.9 | 0 | – | – | – | 359 |
+
+Before this pass, same harness: instrument focused **87.1 %** at 58 FPS,
+archive focused **89.5 %** at only 34 FPS — GTK re-uploading a full-window
+cairo surface every frame. Hidden-state rows report the last FPS sample before
+suspension in the raw log; the frame clock is stopped and CPU confirms it.
+
+Unfocused measurements on a desktop in use are affected by Hyprland's
+follow-mouse focus. The harness parks the focus sink under the pointer, but
+pointer movement can still return focus. The instrument unfocused row is from
+a run where focus held for the whole dwell; the cadence policy itself is
+proven by gate P12.
+
+**RSS** at instrument is ~240–310 MB; `smaps` shows ~96 MB of that is
+file-backed shared libraries (NVIDIA GL 34 MB, LLVM 19 MB, GTK 8 MB). The
+process's own anonymous memory is ~130 MB (Python, NumPy, decoded module
+sprites, device-resolution caches).
+
+## Headless frame cost, steady state (`qa/gates.py` GATE 3)
+
+| size | sim | organism | console | total |
+|---|---|---|---|---|
+| 900×700 | 0.26 ms | 0.66 ms | 0.37 ms | **1.29 ms** (was 4.26) |
+| 1400×860 | 0.26 ms | 0.78 ms | 0.74 ms | 1.79 ms (was 5.29) |
+| 1920×1080 | 0.27 ms | 1.15 ms | 1.49 ms | 2.91 ms (was 8.27) |
+| 2560×1600 | 0.28 ms | 2.54 ms | 3.39 ms | 6.20 ms (was 14.86) |
+
+A rack region rebuild (on a telemetry sample) costs ~6 ms at 1440×900 @1.6×,
+five times a second.
+
+## Known limitations
+
+- The generator cannot hold an exact pitch; the selector wells are trued
+  deterministically at build time (max correction 0.99 runtime px), hidden
+  under the keys.
+- The telemetry rack's state wells are narrower than the reference's (12 % vs
+  19 % of the rack width); state words use deliberate short forms below
+  ~70 px (`NOM.`, `ELEV.`).
+- The shell's generated perimeter is thicker than the reference's; it is drawn
+  at 0.17 of the chassis scale, which stretches the edge-band texture along
+  its length (reads as brushed metal).
+- The organism point field is rendered at logical resolution and upscaled on
+  HiDPI (by choice, for CPU).
+- Omarchy's default window opacity lets the wallpaper show faintly through
+  the glass; see README for the per-window rule.
