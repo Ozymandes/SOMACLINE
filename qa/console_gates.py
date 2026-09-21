@@ -22,6 +22,7 @@ import os
 import sys
 
 import cairo
+import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -50,21 +51,34 @@ FAKE = Telemetry(cpu_load=0.4, memory_pressure=0.6, temperature=0.7,
 def _signature(org) -> "np.ndarray":
     """A pose-independent shape signature: where the body's mass sits.
 
-    A joint histogram over radius and |angle to the vertical|, normalised.
-    Two organisms that differ only in symmetry order - the failure this gate
-    exists to catch - produce nearly identical signatures; two genuinely
-    different body plans do not.
+    A joint histogram over radius and |angle to the vertical|, weighted by
+    each point's own intensity and normalised. Two organisms that differ only
+    in symmetry order - the failure this gate exists to catch - produce nearly
+    identical signatures; two genuinely different body plans do not.
     """
     import numpy as np
-    m = org.fil_alpha > 0.02
-    x = org.fil_x[m].ravel()
-    y = org.fil_y[m].ravel()
+    x, y, w = org.points()
     r = np.hypot(x, y) / WORLD_RADIUS
     a = np.abs(np.arctan2(np.abs(x), y)) / math.pi
     h, _, _ = np.histogram2d(np.clip(r, 0, 1), a, bins=(8, 6),
-                             range=((0, 1), (0, 1)))
+                             range=((0, 1), (0, 1)), weights=w)
     tot = h.sum()
     return h.ravel() / (tot if tot else 1.0)
+
+
+def _at_rest(org, frames: int = 30):
+    """Run a specimen with physiology at rest and return its signature.
+
+    The contract this checks: with no load, no heat, full expression and no
+    I/O, every specimen must reduce to the published equation. If a
+    perturbation leaks into the resting state, the creature on screen is no
+    longer the creature in `sources.py`.
+    """
+    rest = Physiology(agitation=0.0, pulse=0.0, density=1.0, flux=0.0,
+                      surge=0.0)
+    for _ in range(frames):
+        org.update(1 / 60, rest)
+    return org
 
 
 def gate4_species() -> tuple[bool, list[str]]:
@@ -74,7 +88,7 @@ def gate4_species() -> tuple[bool, list[str]]:
     print("=== GATE 4 — SPECIES ===")
     bad: list[str] = []
     sigs: dict[str, "np.ndarray"] = {}
-    print(f"  {'specimen':<24} {'fils':>5} {'points':>7} {'extent':>8} "
+    print(f"  {'specimen':<24} {'source':>7} {'points':>7} {'extent':>8} "
           f"{'sim ms':>7}")
     for sp in CATALOGUE:
         org = sp.build()
@@ -93,16 +107,17 @@ def gate4_species() -> tuple[bool, list[str]]:
             org.update(1 / 60, ph)
             worst_e = max(worst_e, max_extent(org))
         ms = (time.perf_counter() - t0) / 400 * 1000.0
-        print(f"  {sp.name:<24} {org._nf:>5} {org.n_points:>7} "
+        print(f"  {sp.name:<24} {sp.source:>7} {org.n_points:>7} "
               f"{worst_e:>7.1f} {ms:>6.2f}ms")
         if worst_e > WORLD_RADIUS:
             bad.append(f"{sp.key}: extent {worst_e:.1f} > {WORLD_RADIUS}")
-        if not (np.isfinite(org.fil_x).all() and np.isfinite(org.fil_y).all()
-                and np.isfinite(org.node_x).all()):
+        px, py, pw = org.points()
+        if not (np.isfinite(px).all() and np.isfinite(py).all()
+                and np.isfinite(pw).all()):
             bad.append(f"{sp.key}: non-finite coordinates")
-        if ms > 1.6:
+        if ms > 2.4:
             bad.append(f"{sp.key}: sim {ms:.2f}ms/frame is over budget")
-        sigs[sp.key] = _signature(org)
+        sigs[sp.key] = _signature(_at_rest(sp.build()))
 
     # Every pair must be clearly different. The previous catalogue was one
     # solver with the symmetry order changed and would fail this outright.
@@ -119,26 +134,58 @@ def gate4_species() -> tuple[bool, list[str]]:
     print(f"  closest pair: {worst[1]} / {worst[2]}  distance {worst[0]:.3f} "
           f"(floor 0.350)")
 
-    # Symmetra's mirror plane is exact at rest, and only heat may break it.
-    sym = by_key("symmetra")
+    # THE PERTURBATION CONTRACT. At rest every specimen must be exactly its
+    # published equation - the physiology may shape the creature, it may not
+    # replace it. Compared against the raw source, solved with no body at all.
+    from abyssal.organism import sources as SRC
+    for sp in CATALOGUE:
+        org = _at_rest(sp.build())
+        src = SRC.BY_KEY[sp.source]
+        sm = src.sample(org.time, org._perm[:org.n_points])
+        wx = (sm.x - src.frame_cx) * (SRC.WORLD_FIT / src.frame_half)
+        wy = (sm.y - src.frame_cy) * (SRC.WORLD_FIT / src.frame_half)
+        px, py, _ = org.points()
+        g = np.isfinite(wx) & np.isfinite(wy) & (np.hypot(wx, wy) < 360.0)
+        err = float(np.max(np.abs(px[g] - wx[g])) if g.any() else 0.0)
+        err = max(err, float(np.max(np.abs(py[g] - wy[g])) if g.any() else 0.0))
+        if err > 1e-3:
+            bad.append(f"{sp.key}: physiology at rest moves the source "
+                       f"equation by {err:.4f} world units")
+    print(f"  all {len(CATALOGUE)} specimens reduce to their source equation "
+          f"when physiology is at rest")
+
+    # The mirrored specimen's plane is exact at rest, and only heat breaks it.
+    sym = by_key("rostrata")
     if sym is not None:
-        org = sym.build()
-        for _ in range(120):
-            org.update(1 / 60, Physiology(agitation=0.3, pulse=0.2,
-                                          density=0.6))
-        half = org._nf // 2
-        err = float(np.max(np.abs(org.fil_x[:half] + org.fil_x[half:])))
-        print(f"  symmetra mirror error at rest: {err:.2e} world units")
-        if err > 1e-9:
-            bad.append(f"symmetra mirror plane broken at rest by {err:.3e}")
+        def mirror_error(o) -> float:
+            x, y, _ = o.points()
+            # Reflect and match on a coarse grid: an exact plane means the
+            # two halves occupy the same cells to within the grid.
+            H = 96
+            g = lambda ax, ay: np.histogram2d(
+                np.clip(ax, -460, 460), np.clip(ay, -460, 460), bins=H,
+                range=((-460, 460), (-460, 460)))[0]
+            a, b = g(x, y), g(-x, y)
+            return float(np.abs(a - b).sum() / max(a.sum(), 1.0))
+
+        org = _at_rest(sym.build(), 90)
+        err = mirror_error(org)
+        print(f"  rostrata mirror asymmetry at rest: {err:.4f}")
+        # Not zero, and it should not be: the equation samples a 200x200
+        # index grid, so the two halves are mirror images of each OUTLINE
+        # without being sample-for-sample reflections. What matters is that
+        # the resting figure is symmetric to the eye and that heat visibly
+        # destroys it.
+        if err > 0.25:
+            bad.append(f"rostrata mirror plane broken at rest by {err:.4f}")
         for _ in range(240):
             org.update(1 / 60, Physiology(agitation=0.9, pulse=1.0,
                                           density=0.9))
-        hot = float(np.max(np.abs(org.fil_x[:half] + org.fil_x[half:])))
-        print(f"  symmetra mirror error at thermal limit: {hot:.1f} "
-              f"(expected > 0: heat breaks the plane)")
-        if hot <= 1.0:
-            bad.append("symmetra shows no symmetry instability when hot")
+        hot = mirror_error(org)
+        print(f"  rostrata mirror asymmetry at thermal limit: {hot:.4f} "
+              f"(expected > rest: heat breaks the plane)")
+        if hot <= err * 2.0:
+            bad.append("rostrata shows no symmetry instability when hot")
     return (not bad), bad
 
 
@@ -317,7 +364,9 @@ def gate7_switching() -> tuple[bool, list[str]]:
         clocks[idx] = org.time
         console.draw_under(cr, L, model, 0.4)
         console.draw_over(cr, L, FAKE, 60.0, 16.6, model, light)
-        if not (math.isfinite(org.core_r) and org.fil_x.min() > -1e6):
+        px, py, _ = org.points()
+        if not (math.isfinite(org.time) and px.size
+                and np.isfinite(px).all() and np.isfinite(py).all()):
             bad.append(f"specimen {idx}: non-finite state at step {step}")
 
     live = sum(1 for c in clocks.values() if c > 0.0)

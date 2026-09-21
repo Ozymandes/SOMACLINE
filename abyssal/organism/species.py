@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import mathforms as MF
-from .mathforms import Body
+from .mathforms import SourceBody
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,11 +48,11 @@ class Species:
     plan: str                    # body-plan word, shown in the field heading
     notes: str                   # short archive note
     response: str                # behavioural mapping summary
-    factory: Callable[..., Body]
+    source: str          # key into organism.sources.SOURCES
 
-    def build(self, seed: int = 20260920) -> Body:
+    def build(self, seed: int = 20260920) -> SourceBody:
         """Construct this specimen's organism. Allocates; call once per key."""
-        return self.factory(seed=seed)
+        return MF.build(self.source, seed=seed)
 
     @property
     def symmetry_short(self) -> str:
@@ -62,37 +62,37 @@ class Species:
 
 CATALOGUE: tuple[Species, ...] = (
     Species(
-        key="ciliaribbon",
-        name="CILIARADIA SIGMATA",
-        epithet="THE SIGMOID RIBBON",
+        key="sigmata",
+        name="PLUMARIA SIGMATA",
+        epithet="THE SIGMOID PLUME",
         archive="AQS-0042",
         cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
         short="SIGMA",
-        morphology="CILIATE RIBBON",
-        symmetry="BILATERAL / CURVILINEAR",
+        morphology="SIGMOID PLUME",
+        symmetry="AXIAL / CURVILINEAR",
         plan="AXIAL",
-        notes="METACHRONAL CILIATION",
-        response="LOAD READS AS BEAT FREQUENCY",
-        factory=MF.Ciliaribbon,
+        notes="BIFURCATED FILAMENT SHEET",
+        response="LOAD READS AS A RIPPLE DOWN THE BODY",
+        source="s01",
     ),
     Species(
-        key="funnelis",
-        name="INFUNDIBULA COLONIALIS",
-        epithet="THE THREEFOLD BELL",
+        key="coniugata",
+        name="DIPLOSOMA CONIUGATA",
+        epithet="THE COUPLED PAIR",
         archive="AQS-0117",
         cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        short="BELL",
-        morphology="INFUNDIBULATE",
-        symmetry="COLONIAL / ACENTRIC",
-        plan="COLONIAL",
-        notes="RULED CONIC SURFACES",
-        response="THERMAL READS AS APERTURE",
-        factory=MF.Funnelis,
+        short="DIPLO",
+        morphology="DIPLOSOMATIC",
+        symmetry="PAIRED / ACENTRIC",
+        plan="PAIRED",
+        notes="TWO BODIES, ONE EQUATION",
+        response="I/O CROSSES BETWEEN THE BODIES",
+        source="s02",
     ),
     Species(
-        key="symmetra",
+        key="rostrata",
         name="SYMMETRA ROSTRATA",
         epithet="THE MIRRORED ROSTRUM",
         archive="AQS-0233",
@@ -104,37 +104,37 @@ CATALOGUE: tuple[Species, ...] = (
         plan="MIRROR",
         notes="EXACT REFLECTION PLANE",
         response="HEAT BREAKS THE MIRROR PLANE",
-        factory=MF.Symmetra,
+        source="s03",
     ),
     Species(
-        key="dyad",
-        name="DYADIS CONIUGATA",
-        epithet="THE COUPLED PAIR",
+        key="quadriplex",
+        name="QUADRIPLUMA ARTICULATA",
+        epithet="THE QUARTERED PLUME",
         archive="AQS-0308",
         cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        short="DYAD",
-        morphology="DIPLOSOMATIC",
-        symmetry="PAIRED / ASYMMETRIC",
-        plan="PAIRED",
-        notes="COMB AND ORBIT, COUPLED",
-        response="I/O READS AS A TRAVELLING PACKET",
-        factory=MF.Dyad,
+        short="QUADRI",
+        morphology="QUADRIPLUMATE",
+        symmetry="FOUR-PART / ARTICULATED",
+        plan="QUARTERED",
+        notes="FOUR PLUMES, ONE INDEX CLASS",
+        response="LOAD DESYNCHRONISES THE FOUR",
+        source="s04",
     ),
     Species(
-        key="frond",
-        name="PLUMIRADIA FALCATA",
-        epithet="THE HOODED FROND",
+        key="solitaria",
+        name="PENNARIA SOLITARIA",
+        epithet="THE SOLITARY FEATHER",
         archive="AQS-0451",
         cls="MATHEMATICAL FORM",
         origin="SYNTHETIC",
-        short="FROND",
-        morphology="FALCATE PLUME",
-        symmetry="BILATERAL / ARCUATE",
+        short="PENNA",
+        morphology="PENNATE",
+        symmetry="AXIAL / ARCUATE",
         plan="ARCUATE",
-        notes="SINGLE ARCUATE RACHIS",
-        response="HIGHEST MOTION SENSITIVITY",
-        factory=MF.Frond,
+        notes="ONE RACHIS, RIBBED VANE",
+        response="THE WHIP GROWS TOWARD THE TIP",
+        source="s05",
     ),
 )
 

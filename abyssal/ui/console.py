@@ -1019,10 +1019,15 @@ def _radius_ruler(cr, sc: Scope, r: Rect, t, alpha: float = 1.0,
     # The caption heads its own scale, and the gutter it reports back is wide
     # enough for the caption as well as the tick labels - so the SPECIMEN
     # FIELD zone begins clear of it rather than on top of it.
-    _show(cr, "RADIUS (mm)", sz, _W_NORMAL, t.tracking, r.x + indent,
-          sc.cy - span - _cap(sz) * 1.6, INK_DIM, 0.80 * alpha, "l")
-    cap_w = _text_w("RADIUS (mm)", sz, _W_NORMAL, t.tracking)
-    return max(x_tick - r.x + sz * 1.2, indent + cap_w + sz * 1.0)
+    # "R (mm)", not "RADIUS (mm)": the caption sets the width of the gutter
+    # the SPECIMEN FIELD and VECTOR FIELD zones must start after, and every
+    # pixel of that gutter is a pixel those zones cannot use without entering
+    # the specimen's disc. R is the standard notation on a radial scale.
+    cap = "R (mm)"
+    _show(cr, cap, sz, _W_NORMAL, t.tracking, r.x + indent,
+          sc.cy - span - _cap(sz) * 1.6, INK_TECH, 0.84 * alpha, "l")
+    cap_w = _text_w(cap, sz, _W_NORMAL, t.tracking)
+    return max(x_tick - r.x + sz * 1.2, indent + cap_w + sz * 0.8)
 
 
 def _scale_bar(cr, sc: Scope, r: Rect, t, alpha: float = 1.0) -> float:
@@ -1059,7 +1064,8 @@ def _scale_bar(cr, sc: Scope, r: Rect, t, alpha: float = 1.0) -> float:
 
 def _field_block(cr, x: float, y: float, w: float, rows, t,
                  heading: str | None = None, alpha: float = 1.0,
-                 align_r: bool = False, measure_only: bool = False) -> float:
+                 align_r: bool = False, measure_only: bool = False,
+                 max_h: float = 1e9) -> float:
     """One annotation zone inside the observation field. Returns its height.
 
     `measure_only` lays the block out without drawing, so a bottom-anchored
@@ -1083,31 +1089,47 @@ def _field_block(cr, x: float, y: float, w: float, rows, t,
                       (x + w) if align_r else (x + hw), yy + _cap(hz) * 1.45,
                       RULE, 0.9 * alpha)
         yy += line * 1.18
-    keyw = min(w * 0.66,
-               max(_text_w(k + ":", sz, _W_NORMAL, t.tracking)
-                   for k, _ in rows) + sz * 0.9)
-    for k, v in rows:
+    # The key column is shared, so the block reads as an aligned table - but
+    # it may never take more than 60% of the zone. A row whose key or value
+    # does not fit that table goes KEY-OVER-VALUE on its own; a row that does
+    # not fit even then is dropped. Rows arrive in priority order, and any row
+    # that would push the block past `max_h` - into the scope's horizontal
+    # axis - is dropped too. Nothing is ever ellipsised: a truncated reading
+    # ("+0.072, +0.0...") is a wrong number, and a wrong number on an
+    # instrument is worse than a missing one.
+    vtrack = t.tracking * 0.6
+    keys = [_text_w(k + ":", sz, _W_NORMAL, t.tracking) for k, _ in rows]
+    col = min(max(keys) + sz * 0.9, w * 0.60)
+    for (k, v), kw in zip(rows, keys):
+        vw = _text_w(v, sz, _W_MEDIUM, vtrack)
+        inline = kw + sz * 0.6 <= col and vw <= w - col
+        if not inline and (vw > w or kw > w):
+            continue
+        step = line if inline else line * 2.0
+        if (yy - y) + step > max_h:
+            continue
         base = yy + _cap(sz)
-        # A value wider than its column drops to a line of its own rather
-        # than being ellipsised. A truncated measurement is worse than a
-        # taller block: the whole point of the field is that it reads true.
-        wide = _text_w(v, sz, _W_MEDIUM, t.tracking * 0.6) > (w - keyw)
         if not measure_only:
             if align_r:
-                _show(cr, k + ":", sz, _W_NORMAL, t.tracking,
-                      x + w - (0.0 if wide else keyw + sz * 0.6), base,
-                      INK_TECH, 0.86 * alpha, "r", w)
-                _show(cr, v, sz, _W_MEDIUM, t.tracking * 0.6, x + w,
-                      base + (line if wide else 0.0), INK, 0.92 * alpha, "r",
-                      w if wide else (w - keyw))
+                if inline:
+                    _show(cr, k + ":", sz, _W_NORMAL, t.tracking,
+                          x + w - col + sz * 0.3, base, INK_TECH,
+                          0.86 * alpha, "r")
+                    _show(cr, v, sz, _W_MEDIUM, vtrack, x + w, base, INK,
+                          0.92 * alpha, "r")
+                else:
+                    _show(cr, k + ":", sz, _W_NORMAL, t.tracking, x + w,
+                          base, INK_TECH, 0.86 * alpha, "r")
+                    _show(cr, v, sz, _W_MEDIUM, vtrack, x + w, base + line,
+                          INK, 0.92 * alpha, "r")
             else:
                 _show(cr, k + ":", sz, _W_NORMAL, t.tracking, x, base,
-                      INK_TECH, 0.86 * alpha, "l", w if wide else keyw)
-                _show(cr, v, sz, _W_MEDIUM, t.tracking * 0.6,
-                      x + (0.0 if wide else keyw),
-                      base + (line if wide else 0.0), INK, 0.92 * alpha, "l",
-                      w if wide else (w - keyw))
-        yy += line * (2.0 if wide else 1.0)
+                      INK_TECH, 0.86 * alpha, "l")
+                _show(cr, v, sz, _W_MEDIUM, vtrack,
+                      x + (col if inline else 0.0),
+                      base + (0.0 if inline else line), INK, 0.92 * alpha,
+                      "l")
+        yy += step
     return yy - y
 
 
@@ -1167,6 +1189,31 @@ def _field_gutter(L: Layout, m: ConsoleModel) -> float:
     return _radius_ruler(_NULL_CR, sc, safe, L.type, indent=bracket * 0.85)
 
 
+#: Share of the design radius a seated specimen occupies. Must equal
+#: organism.sources.WORLD_FIT / WORLD_RADIUS; kept as a constant because ui/
+#: does not import the organism package.
+_SPECIMEN_SHARE = 372.0 / 460.0
+
+
+def _clear_of_disc(cx: float, cy: float, r: float, y_edge: float,
+                   want_right: float, margin: float) -> float:
+    """Rightmost x a LEFT-hand zone may reach at row `y_edge` without
+    entering the specimen's disc.
+
+    The specimen is round; the annotation zones are rectangles in the corners.
+    A zone is only in the way where its INNER corner falls inside the disc,
+    so the allowable width depends on how far above or below the centre that
+    corner sits - a short block at the very top may run much further toward
+    the axis than a tall one. This is the circle, solved, rather than a
+    conservative column that would waste the whole corner.
+    """
+    dy = abs(cy - y_edge)
+    if dy >= r + margin:
+        return want_right
+    half = math.sqrt(max(0.0, (r + margin) ** 2 - dy * dy))
+    return min(want_right, cx - half)
+
+
 def _draw_field_live(cr, L: Layout, m: ConsoleModel) -> None:
     """The readings: four annotation zones, every value from live state.
 
@@ -1191,6 +1238,21 @@ def _draw_field_live(cr, L: Layout, m: ConsoleModel) -> None:
     max_w = min(glass.w * 0.345, (sc.cx - left_x) - glass.w * 0.045, 320.0)
     bw = max(90.0, max_w if big else min(glass.w * 0.44,
                                          sc.cx - left_x - 8.0))
+    # The specimen's own disc. Every zone below is clamped so that its inner
+    # corner stays outside it: the creature is the object under observation,
+    # and a reading printed across it is an obstruction, not a measurement.
+    body_r = sc.rad * _SPECIMEN_SHARE
+    gap = max(6.0, glass.w * 0.012)
+    # Height budgets: a top zone ends before the X axis and its cardinal
+    # label, a bottom zone starts after them.
+    axis_clear = _cap(max(MIN_TEXT, min(t.micro, 10.0))) * 2.6
+    top_h = max(0.0, (sc.cy - axis_clear) - safe.y)
+    bot_h = max(0.0, safe.bottom - (sc.cy + axis_clear))
+
+    def fit(y_edge: float, width: float) -> float:
+        right = _clear_of_disc(sc.cx, sc.cy, body_r, y_edge,
+                               left_x + width, gap)
+        return max(0.0, right - left_x)
 
     # A narrower field drops rows rather than ellipsising them: an observation
     # annotation that cannot be read in full is worse than one not shown,
@@ -1204,29 +1266,56 @@ def _draw_field_live(cr, L: Layout, m: ConsoleModel) -> None:
         rows = [("MODE", "LIVE"),
                 ("MAG", f"{m.magnification:.1f}x"),
                 ("FIELD", f"{m.field_mm:.2f} mm")]
-    _field_block(cr, left_x, safe.y, bw, tuple(rows), t,
-                 heading="SPECIMEN FIELD")
+    rows = tuple(rows)
+
+    # Top-left: size the block, then clamp it to the disc at its own lower
+    # edge. Clamping can make a value wrap, which makes the block taller,
+    # which moves the edge - so settle it in two passes.
+    w_tl = bw
+    for _ in range(2):
+        h = _field_block(cr, left_x, safe.y, w_tl, rows, t,
+                         heading="SPECIMEN FIELD", measure_only=True,
+                         max_h=top_h)
+        w_tl = min(bw, fit(safe.y + h, bw))
+    if w_tl >= 72.0:
+        _field_block(cr, left_x, safe.y, w_tl, rows, t,
+                     heading="SPECIMEN FIELD", max_h=top_h)
     if not big:
         return
 
+    # Top-right mirrors the same rule on the other side of the axis.
     right_edge = safe.right - glass.w * 0.012
+    rrows = (("PHASE", f"{m.phase:.3f} \u03c0"),
+             ("ROTATION", f"{m.rotation:.2f} RPM"),
+             ("SYMMETRY", sp.symmetry_short),
+             ("BEHAVIOR", m.behavior))
     right_w = min(max_w, right_edge - (sc.cx + glass.w * 0.045))
-    if right_w > 90.0:
-        _field_block(cr, right_edge - right_w, safe.y, right_w, (
-            ("PHASE", f"{m.phase:.3f} \u03c0"),
-            ("ROTATION", f"{m.rotation:.2f} RPM"),
-            ("SYMMETRY", sp.symmetry_short),
-            ("BEHAVIOR", m.behavior),
-        ), t, heading=sp.morphology, align_r=True)
+    for _ in range(2):
+        h = _field_block(cr, 0.0, safe.y, right_w, rrows, t,
+                         heading=sp.morphology, align_r=True,
+                         measure_only=True, max_h=top_h)
+        dy = abs(sc.cy - (safe.y + h))
+        if dy < body_r + gap:
+            inner = sc.cx + math.sqrt(max(0.0, (body_r + gap) ** 2 - dy * dy))
+            right_w = min(right_w, right_edge - inner)
+    if right_w >= 72.0:
+        _field_block(cr, right_edge - right_w, safe.y, right_w, rrows, t,
+                     heading=sp.morphology, align_r=True, max_h=top_h)
 
+    # Bottom-left: the clamp is taken at the block's UPPER edge.
     cx, cy, cz = m.coords
     vrows = (("AXIS LOCK", "STABLE"),
              ("TRACKING", "CENTROID"),
-             ("COORDINATES", f"{cx:+.3f}, {cy:+.3f}, {cz:+.3f} mm"))
-    h = _field_block(cr, left_x, 0.0, bw, vrows, t, heading="VECTOR FIELD",
-                     measure_only=True)
-    _field_block(cr, left_x, safe.bottom - h, bw, vrows, t,
-                 heading="VECTOR FIELD")
+             ("COORDINATES", f"{cx:+.3f}, {cy:+.3f} mm"))
+    w_bl = bw
+    for _ in range(2):
+        h = _field_block(cr, left_x, 0.0, w_bl, vrows, t,
+                         heading="VECTOR FIELD", measure_only=True,
+                         max_h=bot_h)
+        w_bl = min(bw, fit(safe.bottom - h, bw))
+    if w_bl >= 72.0:
+        _field_block(cr, left_x, safe.bottom - h, w_bl, vrows, t,
+                     heading="VECTOR FIELD", max_h=bot_h)
 
 
 # --------------------------------------------------------------------------

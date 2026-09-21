@@ -36,7 +36,7 @@ from .core.physiology import PhysiologyModel
 from .core.signals import Telemetry
 from .core.theme import ABYSS
 from .core.viewport import Viewport, isotropy_error
-from .organism.mathforms import Body
+from .organism.mathforms import SourceBody as Body
 from .organism.render import draw_calibration, draw_organism
 from .organism.species import CATALOGUE, by_index
 from .telemetry.source import TelemetrySource
@@ -313,10 +313,17 @@ class Monitor(Gtk.ApplicationWindow):
         p = self.phys_model.current
         mdl.phase = (org.time * 0.31) % 2.0
         mdl.rotation = 0.08 + 0.42 * p.agitation
-        # Centroid of the filament cloud, expressed in field millimetres.
+        # Intensity-weighted centroid of the point cloud, in field
+        # millimetres. It drifts as the creature moves, which is what makes
+        # the COORDINATES reading a reading.
         try:
-            cx = float(org.fil_x.mean()) / 400.0
-            cy = float(org.fil_y.mean()) / 400.0
+            px, py, pw = org.points()
+            tot = float(pw.sum())
+            if tot > 0.0:
+                cx = float((px * pw).sum()) / tot / 400.0
+                cy = float((py * pw).sum()) / tot / 400.0
+            else:
+                cx = cy = 0.0
         except Exception:
             cx = cy = 0.0
         mdl.coords = (cx, cy, 0.0)

@@ -21,6 +21,7 @@ from abyssal.core.physiology import PhysiologyModel  # noqa: E402
 from abyssal.core.signals import Telemetry  # noqa: E402
 from abyssal.core.viewport import Viewport, isotropy_error  # noqa: E402
 from abyssal.core.world import WORLD_RADIUS  # noqa: E402
+from abyssal.organism.mathforms import max_extent  # noqa: E402
 from abyssal.organism.species import CATALOGUE, by_index  # noqa: E402
 from abyssal.core.lighting import LightField  # noqa: E402
 from abyssal.ui import console  # noqa: E402
@@ -77,8 +78,7 @@ def gate1_geometry() -> tuple[bool, list[str]]:
             problems.append(f"{w}x{h}: off-centre by {cerr:.3e}px")
 
         # Clipping: worst-case organism extent must fit the stage.
-        ext_px = max(math.hypot(x, y) for x, y in
-                     zip(org.fil_x.ravel()[::7], org.fil_y.ravel()[::7])) * vp.scale
+        ext_px = max_extent(org) * vp.scale
         room = min(vp.stage_w, vp.stage_h) / 2.0
         if glass.valid and ext_px > room + 0.5:
             problems.append(f"{w}x{h}: organism {ext_px:.1f}px > {room:.1f}px — CLIPS")
@@ -112,7 +112,7 @@ def gate1_geometry() -> tuple[bool, list[str]]:
             problems.append(f"breakpoint {w}x{h}: got {got.value}, want {want.value}")
     print(f"  breakpoints    {'OK' if not any('breakpoint' in p for p in problems) else 'BAD'}")
     print(f"  max design radius {WORLD_RADIUS}, organism max extent "
-          f"{max(math.hypot(x, y) for x, y in zip(org.fil_x.ravel()[::7], org.fil_y.ravel()[::7])):.1f}")
+          f"{max_extent(org):.1f}")
     return (not problems), problems
 
 
@@ -125,8 +125,8 @@ def _shape_signature(org, vp) -> "np.ndarray":
     centre drift shows up here as a non-zero residual, whatever the body plan.
     """
     import numpy as np
-    x = org.fil_x.ravel()[::5]
-    y = org.fil_y.ravel()[::5]
+    x, y, _ = org.points()
+    x, y = x[::5].astype(np.float64), y[::5].astype(np.float64)
     px = vp.cx + x * vp.scale
     py = vp.cy + y * vp.scale
     return np.concatenate([(px - vp.cx) / vp.scale, (py - vp.cy) / vp.scale])
@@ -223,8 +223,10 @@ def gate_resize_invariance() -> tuple[bool, list[str]]:
             draw_organism(cr, vp, b)
         draw_chrome(cr, L, FAKE, 60.0, 16.6)
 
-    dx = float(np.abs(a.fil_x - b.fil_x).max())
-    dy = float(np.abs(a.fil_y - b.fil_y).max())
+    ax, ay, _ = a.points()
+    bx, by, _ = b.points()
+    dx = float(np.abs(ax - bx).max())
+    dy = float(np.abs(ay - by).max())
     dt_ = abs(a.time - b.time)
     print(f"  400 frames, b resized every frame to a random size")
     print(f"  max |dx| {dx:.3e}   max |dy| {dy:.3e}   dt {dt_:.3e}")

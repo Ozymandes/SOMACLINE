@@ -55,6 +55,15 @@ def frame(width: int, height: int, specimen: int = 0, seconds: float = 6.0,
     vp = Viewport.for_stage(glass.x, glass.y, glass.w, glass.h)
     m = console.ConsoleModel(species=sp, active=specimen)
     m.mode_state = "active"
+    ph = phys.current
+    m.phase = (org.time * 0.31) % 2.0
+    m.rotation = 0.08 + 0.42 * ph.agitation
+    px, py, pw = org.points()
+    tot = float(pw.sum()) or 1.0
+    m.coords = (float((px * pw).sum()) / tot / 400.0,
+                float((py * pw).sum()) / tot / 400.0, 0.0)
+    m.magnification = max(0.1, vp.scale * 10.0)
+    m.field_mm = max(0.01, min(vp.stage_w, vp.stage_h) / vp.scale / 400.0)
     light = LightField()
 
     # Prime the traces so the graphs show a real 60 s history, not one point.

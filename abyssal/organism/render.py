@@ -2,71 +2,74 @@
 
 NO cairo transform is ever set. Every coordinate is pushed through
 Viewport.px() / Viewport.length(), which are uniform by construction, so a
-world circle is a screen circle and a stroke width is the same in x and y at
-any window size or aspect ratio. Nothing here mutates the organism.
+world circle is a screen circle at any window size or aspect ratio. Nothing
+here mutates the organism.
+
+WHAT IT DRAWS
+-------------
+An accumulating point field, not paths. The specimens are point clouds of ten
+to forty thousand samples composited additively at a low alpha - the density
+IS the creature - so they are counted into a NumPy buffer and blitted as one
+surface. `organism/pointfield.py` carries that machinery and the reasoning.
+
+COLOUR
+------
+Two ramps, both from the console's own palette:
+
+    density   deep-field blue where the cloud is thin, core cyan where the
+              equation crowds - so the creature's internal structure comes
+              from the maths rather than from a shading trick
+    warmth    the whole ramp shifts amber as thermal stress rises, which is
+              the one place the organism reports the machine's state in
+              colour rather than in shape
 """
 
 from __future__ import annotations
 
-from collections import OrderedDict
-
 import cairo
 import numpy as np
 
-from ..core.theme import CYAN, CYAN_DEEP, LIME, SILVER
+from ..core.theme import AMBER, CYAN, CYAN_DEEP, LIME
 from ..core.viewport import Viewport
 from ..core.world import WORLD_RADIUS
-from .mathforms import Body, max_extent
+from . import pointfield as PF
+from .mathforms import SourceBody, max_extent
 
-# Pixel floors / ceilings so the specimen survives both a postage stamp and a
-# 4K stage without turning into either invisible hairlines or fat blobs.
-MIN_STROKE_PX = 0.45
-MAX_STROKE_PX = 4.0
-MIN_NODE_PX = 0.55
-MAX_NODE_PX = 3.4
-ALPHA_CULL = 0.015
-
-#: Below this drawn pitch a dotted filament is stroked solid instead: the dots
-#: would be closer together than the line is wide, so the dash costs work and
-#: changes nothing visible.
-MIN_DOT_PITCH_PX = 2.6
-MIN_DOT_GAP_PX = 0.85
-
+#: The deep-field wash behind the specimen, in world units.
 _WASH_R = 430.0
 
-# Reusable scratch, keyed by array shape. Renderer-side only; the organism
-# never learns that pixels exist.
-_SCRATCH: dict = {}
+#: Radius of the field buffer, in world units: the design radius plus a
+#: margin for the few soft pixels a point spreads into.
+R_FIELD = WORLD_RADIUS + 4.0
 
-#: The deep-field wash, cached as a rendered disc per quantised radius.
-#: Filling a 900px radial gradient was 6.5ms - by a wide margin the most
-#: expensive single operation in the frame - and its radius changes only on
-#: resize. Rasterising it once and blitting the result is the same pixels for
-#: a twentieth of the cost. Bounded, and derived pixels only.
+#: Largest side the point field is counted at, in pixels. Above it the field
+#: is scaled up on the blit - see draw_organism.
+MAX_FIELD_PX = 760.0
 _WASH_STEP = 6.0
 _WASH_LIMIT = 6
-_WASH: "OrderedDict[int, cairo.ImageSurface]" = OrderedDict()
+_WASH: dict = {}
+_WASH_ORDER: list = []
 
 _CD_R, _CD_G, _CD_B = CYAN_DEEP
 _C_R, _C_G, _C_B = CYAN
-_DR, _DG, _DB = _C_R - _CD_R, _C_G - _CD_G, _C_B - _CD_B
+_A_R, _A_G, _A_B = AMBER
 
 
-def _scratch(shape):
-    buf = _SCRATCH.get(shape)
-    if buf is None:
-        buf = (np.empty(shape, dtype=np.float64),
-               np.empty(shape, dtype=np.float64))
-        _SCRATCH[shape] = buf
-    return buf
+def _mix(a, b, t: float):
+    return (a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t)
 
 
-def _wash_disc(radius: float) -> tuple[cairo.ImageSurface, int] | None:
-    """The deep-field wash rendered to a disc, cached per quantised radius."""
+def _wash_disc(radius: float):
+    """The deep-field wash, rendered once per quantised radius.
+
+    Filling a 900px radial gradient was the most expensive single operation
+    in the frame, and its radius changes only on resize.
+    """
     q = max(1, int(round(radius / _WASH_STEP)))
     hit = _WASH.get(q)
     if hit is not None:
-        _WASH.move_to_end(q)
         return hit
     r = q * _WASH_STEP
     side = int(r * 2.0) + 2
@@ -88,194 +91,79 @@ def _wash_disc(radius: float) -> tuple[cairo.ImageSurface, int] | None:
     surf.flush()
     ent = (surf, side)
     _WASH[q] = ent
-    while len(_WASH) > _WASH_LIMIT:
-        _WASH.popitem(last=False)
+    _WASH_ORDER.append(q)
+    while len(_WASH_ORDER) > _WASH_LIMIT:
+        _WASH.pop(_WASH_ORDER.pop(0), None)
     return ent
 
 
-def draw_organism(cr, vp: Viewport, org: Body) -> None:
+def draw_organism(cr, vp: Viewport, org: SourceBody) -> None:
     """Draw one frame of the specimen. Caller has already painted the field."""
-    scale = vp.scale
-    cx = vp.cx
-    cy = vp.cy
-
-    cr.set_line_cap(cairo.LINE_CAP_ROUND)
-    cr.set_line_join(cairo.LINE_JOIN_ROUND)
-    # Filaments are hairline-thin; FAST antialiasing is visually indistinguishable
-    # from DEFAULT here and is ~16% cheaper, which matters because Cairo is a CPU
-    # rasteriser and this display runs at fractional scale 1.6. Restored before
-    # returning so text and chrome keep full-quality antialiasing.
-    prev_aa = cr.get_antialias()
-    cr.set_antialias(cairo.ANTIALIAS_FAST)
-
-    # ---- 1. deep-field wash ------------------------------------------------
+    # ---- deep-field wash ---------------------------------------------------
     wash = _wash_disc(vp.length(_WASH_R))
     if wash is not None:
         disc, side = wash
-        cr.set_source_surface(disc, round(cx - side * 0.5),
-                              round(cy - side * 0.5))
+        cr.save()
+        cr.set_source_surface(disc, round(vp.cx - side * 0.5),
+                              round(vp.cy - side * 0.5))
         cr.paint()
+        cr.restore()
 
-    # ---- 2. filaments, back to front by alpha ------------------------------
-    px, py = _scratch(org.fil_x.shape)
-    np.multiply(org.fil_x, scale, out=px)
-    np.add(px, cx, out=px)
-    np.multiply(org.fil_y, scale, out=py)
-    np.add(py, cy, out=py)
-
-    xs = px.tolist()
-    ys = py.tolist()
-    alpha = org.fil_alpha
-    order = alpha.argsort().tolist()
-    a_l = alpha.tolist()
-    w_l = org.fil_width.tolist()
-    t_l = org.fil_tint.tolist()
-    d_l = org.fil_dot.tolist()
-
-    move_to = cr.move_to
-    line_to = cr.line_to
-    stroke = cr.stroke
-    set_rgba = cr.set_source_rgba
-    set_lw = cr.set_line_width
-    cd_r, cd_g, cd_b = _CD_R, _CD_G, _CD_B
-    dr, dg, db = _DR, _DG, _DB
-
-    set_dash = cr.set_dash
-    dashed = False
-    for i in order:
-        a = a_l[i]
-        if a < ALPHA_CULL:
-            continue
-        t = t_l[i]
-        set_rgba(cd_r + dr * t, cd_g + dg * t, cd_b + db * t, a)
-        lw = w_l[i] * scale
-        if lw < MIN_STROKE_PX:
-            lw = MIN_STROKE_PX
-        elif lw > MAX_STROKE_PX:
-            lw = MAX_STROKE_PX
-        set_lw(lw)
-        # The references are drawn as sequences of DOTS, not continuous ink.
-        # A dash pattern reproduces that for the cost of one call, where one
-        # filament per dot would multiply the path count by twenty. Below the
-        # pitch at which dots would merge into a line anyway, the filament is
-        # simply stroked solid - which is also what keeps a tiny stage cheap.
-        pitch = d_l[i] * scale
-        if pitch >= MIN_DOT_PITCH_PX:
-            gap = pitch - lw
-            if gap < MIN_DOT_GAP_PX:
-                gap = MIN_DOT_GAP_PX
-            set_dash([lw * 0.95, gap], 0.0)
-            dashed = True
-        elif dashed:
-            set_dash([], 0.0)
-            dashed = False
-        rx = xs[i]
-        ry = ys[i]
-        move_to(rx[0], ry[0])
-        for j in range(1, len(rx)):
-            line_to(rx[j], ry[j])
-        stroke()
-    if dashed:
-        set_dash([], 0.0)
-
-    # ---- 3. luminous construction nodes ------------------------------------
-    nx = org.node_x
-    ny = org.node_y
-    nxs = (nx * scale + cx).tolist()
-    nys = (ny * scale + cy).tolist()
-    nrs = org.node_r.tolist()
-    nas = org.node_a.tolist()
-    arc = cr.arc
-    fill = cr.fill
-    new_path = cr.new_path
-    s_r, s_g, s_b = SILVER
-    TAU = 6.283185307179586
-
-    set_lw(max(MIN_STROKE_PX, min(1.0, 0.9 * scale * 2.0)))
-    for i in range(len(nrs)):
-        a = nas[i]
-        if a < ALPHA_CULL:
-            continue
-        r = nrs[i] * scale
-        if r < MIN_NODE_PX:
-            r = MIN_NODE_PX
-        elif r > MAX_NODE_PX:
-            r = MAX_NODE_PX
-        x = nxs[i]
-        y = nys[i]
-        # dim ring, then crisp dot
-        if r > 1.1:
-            set_rgba(cd_r, cd_g, cd_b, a * 0.45)
-            new_path()
-            arc(x, y, r + 1.4, 0.0, TAU)
-            stroke()
-        set_rgba(s_r, s_g, s_b, a)
-        new_path()
-        arc(x, y, r, 0.0, TAU)
-        fill()
-
-    # ---- 4. core -----------------------------------------------------------
-    # Not every specimen has one. A body whose structure IS its centre - the
-    # comb, the frond, the mirrored rostrum - would be falsified by a glowing
-    # bead at the world origin, so a zero radius draws nothing at all.
-    if org.core_r <= 0.0:
-        cr.set_antialias(prev_aa)
+    # ---- the point field ---------------------------------------------------
+    # The field buffer covers the creature's own disc - the design radius -
+    # and not the whole stage. The colour map is a per-PIXEL pass, so sizing
+    # it to a wide stage paid for empty glass on either side of the animal;
+    # at 2560x1600 that was most of a 74 ms frame.
+    #
+    # Beyond MAX_FIELD_PX the field is counted at that resolution and scaled
+    # up once on the blit. These are soft one- and two-pixel points, so a
+    # modest upscale is invisible, and it bounds the cost at any window size.
+    side_px = 2.0 * R_FIELD * vp.scale
+    if side_px < 8.0:
         return
-    core = vp.length(org.core_r)
-    if core < 1.5:
-        core = 1.5
+    res = min(1.0, MAX_FIELD_PX / side_px)
+    side = int(side_px * res) + 2
+    wx, wy, weight = org.points()
+    if wx.size == 0:
+        return
 
-    # inner body
-    set_rgba(cd_r, cd_g, cd_b, 0.15)
-    new_path()
-    cr.arc(cx, cy, core * 0.92, 0.0, TAU)
-    fill()
+    ent = PF.field_buffers(org.src.key, side, side)
+    k = np.float32(vp.scale * res)
+    half = np.float32(side * 0.5)
+    px = wx * k + half
+    py = wy * k + half
+    acc = PF.accumulate(ent, px, py, weight, org.persist)
 
-    # 2-pass halo: wide + very low alpha under a crisp hairline. No bloom.
-    set_rgba(_C_R, _C_G, _C_B, 0.07)
-    set_lw(max(1.2, core * 0.42))
-    new_path()
-    cr.arc(cx, cy, core * 1.06, 0.0, TAU)
-    stroke()
+    # Ink is scaled by how many BUFFER pixels one world unit covers: the same
+    # cloud spread over four times the area must be counted four times as
+    # strongly, or the creature fades out as the window grows.
+    eff = vp.scale * res
+    ink = min(org.src.ink * 0.78 / max(eff * eff * 3.4, 0.02), 3.6)
 
-    set_rgba(_C_R, _C_G, _C_B, 0.80)
-    set_lw(max(MIN_STROKE_PX, min(1.8, core * 0.075)))
-    new_path()
-    cr.arc(cx, cy, core, 0.0, TAU)
-    stroke()
+    warm = org.warmth
+    lo = _mix(CYAN_DEEP, (0.34, 0.20, 0.06), warm)
+    hi = _mix(CYAN, AMBER, warm)
+    up = 1.0 / res
+    PF.paint(cr, ent, acc, vp.cx - side * 0.5 * up, vp.cy - side * 0.5 * up,
+             lo, hi, ink, scale_up=up)
 
-    # inner construction ring + centre mark
-    set_rgba(_C_R, _C_G, _C_B, 0.26)
-    set_lw(MIN_STROKE_PX)
-    new_path()
-    cr.arc(cx, cy, core * 0.46, 0.0, TAU)
-    stroke()
 
-    set_rgba(0.92, 0.98, 1.0, 0.85)
-    new_path()
-    cr.arc(cx, cy, max(0.7, core * 0.10), 0.0, TAU)
-    fill()
-
-    cr.set_antialias(prev_aa)
-
-def draw_calibration(cr, vp: Viewport, org: Body) -> None:
+def draw_calibration(cr, vp: Viewport, org: SourceBody) -> None:
     """DEBUG overlay -- GATE 1 circularity check.
 
     World circles at WORLD_RADIUS and r=250, a crosshair through the world
-    origin, and the four 45-degree lobe spokes. If the stage is ever stretched
+    origin, and the specimen's current extent. If the stage is ever stretched
     these circles show up as ellipses on the very first frame.
     """
     import math
 
-    cx = vp.cx
-    cy = vp.cy
+    cx, cy = vp.cx, vp.cy
     l_r, l_g, l_b = LIME
     TAU = 6.283185307179586
 
     cr.save()
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
-    cr.set_line_join(cairo.LINE_JOIN_ROUND)
-    cr.set_line_width(max(MIN_STROKE_PX, 1.0))
+    cr.set_line_width(1.0)
 
     for r_world, a in ((WORLD_RADIUS, 0.26), (250.0, 0.17)):
         cr.set_source_rgba(l_r, l_g, l_b, a)
@@ -283,7 +171,6 @@ def draw_calibration(cr, vp: Viewport, org: Body) -> None:
         cr.arc(cx, cy, vp.length(r_world), 0.0, TAU)
         cr.stroke()
 
-    # crosshair through the world origin
     cr.set_source_rgba(l_r, l_g, l_b, 0.13)
     ext = vp.length(WORLD_RADIUS + 26.0)
     cr.new_path()
@@ -293,7 +180,6 @@ def draw_calibration(cr, vp: Viewport, org: Body) -> None:
     cr.line_to(cx, cy + ext)
     cr.stroke()
 
-    # 45-degree quadrant spokes -- one per lobe axis
     cr.set_source_rgba(l_r, l_g, l_b, 0.19)
     cr.new_path()
     for k in range(4):
@@ -305,16 +191,14 @@ def draw_calibration(cr, vp: Viewport, org: Body) -> None:
         cr.line_to(x1, y1)
     cr.stroke()
 
-    # current actual extent, so drift is visible against the design radius
     try:
         e = max_extent(org)
     except Exception:
         e = 0.0
     if e > 0.0:
         cr.set_source_rgba(l_r, l_g, l_b, 0.38)
-        cr.set_line_width(max(MIN_STROKE_PX, 0.8))
+        cr.set_line_width(0.8)
         cr.new_path()
         cr.arc(cx, cy, vp.length(e), 0.0, TAU)
         cr.stroke()
-
     cr.restore()
