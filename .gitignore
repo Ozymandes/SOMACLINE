@@ -8,3 +8,6 @@ qa-out/
 # The runtime sprites in assets/sprites/ ARE committed - the app needs them.
 assets/hardware_v2/*/
 !assets/hardware_v2/INVENTORY.md
+
+# Rejected / superseded module generations: kept on disk, out of git.
+assets/modules/rejected/

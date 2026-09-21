@@ -1,0 +1,97 @@
+{
+ "shell": {
+  "master": "m01_shell_g1.png",
+  "size": [
+   1600,
+   1172
+  ],
+  "scale": 0.706090026478376,
+  "master_crop": [
+   2266,
+   1660
+  ]
+ },
+ "header": {
+  "master": "m02_header_g1.png",
+  "size": [
+   1800,
+   185
+  ],
+  "scale": 0.6836308393467527,
+  "master_crop": [
+   2633,
+   270
+  ]
+ },
+ "observation": {
+  "master": "m03_observation_g1.png",
+  "size": [
+   1300,
+   948
+  ],
+  "scale": 0.57958091841284,
+  "master_crop": [
+   2243,
+   1635
+  ]
+ },
+ "rack": {
+  "master": "m04_rack_g1.png",
+  "size": [
+   900,
+   1213
+  ],
+  "scale": 0.539568345323741,
+  "master_crop": [
+   1668,
+   2248
+  ]
+ },
+ "selector": {
+  "master": "m05_selector_g4.png",
+  "size": [
+   1400,
+   264
+  ],
+  "scale": 0.5337399923751429,
+  "master_crop": [
+   2623,
+   494
+  ],
+  "trueing": {
+   "pitch": 200.65955013343498,
+   "x0": 294.0373617994663,
+   "cy": 134.502478078536,
+   "well_w": 249,
+   "well_h": 259,
+   "max_residual": 1.8500000000001364,
+   "aux": [
+    [
+     143,
+     214,
+     168,
+     64
+    ],
+    [
+     2316,
+     159,
+     128,
+     199
+    ]
+   ],
+   "max_residual_px": 0.9874189858940872
+  }
+ },
+ "footer": {
+  "master": "m06_footer_g1.png",
+  "size": [
+   1800,
+   93
+  ],
+  "scale": 0.6885998469778117,
+  "master_crop": [
+   2614,
+   135
+  ]
+ }
+}
