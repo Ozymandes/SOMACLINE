@@ -40,6 +40,8 @@ from pathlib import Path
 
 import cairo
 
+from . import hidpi
+
 SPRITE_ROOT = Path(__file__).resolve().parent.parent.parent / "assets" / "sprites"
 
 # Bounded so a long resize drag cannot grow memory without limit. Each entry is
@@ -231,7 +233,7 @@ def _render_nine(ns: NineSlice, w: int, h: int) -> cairo.ImageSurface | None:
     l, r = int(ns.left * kx), int(ns.right * kx)
     t, b = int(ns.top * ky), int(ns.bottom * ky)
 
-    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    out = hidpi.surface(w, h)
     cr = cairo.Context(out)
     cr.set_operator(cairo.OPERATOR_SOURCE)
 
@@ -257,7 +259,8 @@ def nine_surface(ns: NineSlice, w: float, h: float) -> cairo.ImageSurface | None
     wi, hi = int(round(w)), int(round(h))
     if wi < 1 or hi < 1:
         return None
-    key = ("9", ns.name, ns.left, ns.top, ns.right, ns.bottom, wi, hi)
+    key = ("9", ns.name, ns.left, ns.top, ns.right, ns.bottom, wi, hi,
+           hidpi.scale())
     hit = _scaled.get(key)
     if hit is not None:
         _scaled.move_to_end(key)
@@ -291,7 +294,7 @@ def draw_nine(cr: cairo.Context, ns: NineSlice,
 
 # ---------------------------------------------------------------- sprites
 def _scaled_sprite(name: str, w: int, h: int) -> cairo.ImageSurface | None:
-    key = ("s", name, w, h)
+    key = ("s", name, w, h, hidpi.scale())
     hit = _scaled.get(key)
     if hit is not None:
         _scaled.move_to_end(key)
@@ -301,7 +304,7 @@ def _scaled_sprite(name: str, w: int, h: int) -> cairo.ImageSurface | None:
     if src is None:
         return None
     _stats["misses"] += 1
-    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    out = hidpi.surface(w, h)
     cr = cairo.Context(out)
     cr.set_operator(cairo.OPERATOR_SOURCE)
     cr.scale(w / src.get_width(), h / src.get_height())

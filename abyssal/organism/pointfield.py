@@ -59,7 +59,7 @@ import numpy as np
 
 #: Bounded cache of accumulators and output images, keyed by (w, h, species).
 _BUFFERS: "OrderedDict[tuple, dict]" = OrderedDict()
-_BUFFER_LIMIT = 8
+_BUFFER_LIMIT = 3
 
 
 def _buffers(key: tuple, w: int, h: int) -> dict:

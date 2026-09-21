@@ -54,7 +54,7 @@ def frame(width: int, height: int, specimen: int = 0, seconds: float = 6.0,
     glass = console.stage_content(L)
     vp = Viewport.for_stage(glass.x, glass.y, glass.w, glass.h)
     m = console.ConsoleModel(species=sp, active=specimen)
-    m.mode_state = "active"
+    m.mode_state = "armed"
     ph = phys.current
     m.phase = (org.time * 0.31) % 2.0
     m.rotation = 0.08 + 0.42 * ph.agitation
@@ -66,23 +66,20 @@ def frame(width: int, height: int, specimen: int = 0, seconds: float = 6.0,
     m.field_mm = max(0.01, min(vp.stage_w, vp.stage_h) / vp.scale / 400.0)
     light = LightField()
 
-    # Prime the traces so the graphs show a real 60 s history, not one point.
+    # Prime a real 60 s history at the app's telemetry cadence.
     import math
-    for i in range(96):
-        t2 = Telemetry(
-            cpu_load=max(0.0, min(1.0, tel.cpu_load + 0.10 * math.sin(i * 0.31)
-                                  + 0.05 * math.sin(i * 1.7))),
-            memory_pressure=max(0.0, min(1.0, tel.memory_pressure + 0.03 * math.sin(i * 0.2))),
-            temperature=max(0.0, min(1.0, tel.temperature + 0.06 * math.sin(i * 0.17)
-                                     + 0.03 * math.sin(i * 0.9))),
-            temp_available=True, cpu_pct=tel.cpu_pct, mem_used_gb=tel.mem_used_gb,
-            mem_total_gb=tel.mem_total_gb, temp_c=tel.temp_c)
-        for ch in ("cpu", "thermal", "memory", "frame"):
-            pass
-        m.trace("cpu").push(t2.cpu_load)
-        m.trace("thermal").push(t2.temperature)
-        m.trace("memory").push(t2.memory_pressure)
-        m.trace("frame").push(min(1.0, (58 + 3 * math.sin(i * 0.5)) / 120.0))
+    from abyssal.app import TELEMETRY_HZ
+    from abyssal.telemetry.history import History
+    hist = History(TELEMETRY_HZ)
+    for i in range(hist.cap):
+        hist.push(
+            max(0.0, min(100.0, tel.cpu_pct + 9.0 * math.sin(i * 0.05)
+                         + 4.0 * math.sin(i * 0.61))),
+            (tel.temp_c or 60.0) - 3.0 + 3.5 * math.sin(i * 0.037)
+            + 1.2 * math.sin(i * 0.4),
+            tel.mem_used_gb - 0.6 + 0.4 * math.sin(i * 0.013) + 0.2 * (i / hist.cap),
+            1000.0 / max(fps, 1.0) + 1.4 * math.sin(i * 0.29) + (6.0 if i % 97 < 3 else 0.0))
+    m.history = hist
 
     console.draw_under(cr, L, m, vp.scale)
     if L.stage.valid:

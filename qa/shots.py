@@ -4,25 +4,25 @@ from __future__ import annotations
 import os, subprocess, sys, time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-OUT = "/tmp/claude-1000/abyssal-qa/final"
+OUT = os.environ.get("ABYSSAL_SHOTS", "/tmp/claude-1000/abyssal-qa/final")
 sys.path.insert(0, ROOT)
 from qa.torture import d_float, d_resize, dsp, find_win, focus, hypr, settle, wait_for_window  # noqa: E402
 
 import json  # noqa: E402
 
-SHOTS = [("compact", 460, 380, []), ("instrument", 900, 700, []),
-         ("instrument-tall", 760, 620, []), ("archive", 1400, 880, []),
-         ("calibration", 900, 700, ["--calibration"]),
-         ("specimen-2-coniugata", 1400, 880, ["--specimen", "1"]),
-         ("specimen-3-rostrata", 1400, 880, ["--specimen", "2"]),
-         ("specimen-4-quadriplex", 1400, 880, ["--specimen", "3"]),
-         ("specimen-5-solitaria", 1400, 880, ["--specimen", "4"])]
+SHOTS = [("instrument", 900, 700, []),
+         ("archive", 1560, 880, []),
+         ("compact", 600, 480, []),
+         ("specimen-01", 1200, 900, ["--specimen", "0"]),
+         ("specimen-03", 1200, 900, ["--specimen", "2"]),
+         ("thermal-elevated", 1200, 900, ["--qa-temp", "86"]),
+         ("reference-size", 1333, 1000, [])]
 
 #: Close-ups cropped from a captured shot: (source, name, x, y, w, h) as
 #: FRACTIONS of the captured image, so they survive a resolution change.
-CROPS = [("archive", "closeup-header", 0.02, 0.02, 0.96, 0.20),
-         ("archive", "closeup-module", 0.60, 0.17, 0.39, 0.22),
-         ("archive", "closeup-selector", 0.02, 0.66, 0.60, 0.22)]
+CROPS = [("specimen-01", "closeup-header", 0.02, 0.02, 0.96, 0.17),
+         ("specimen-01", "closeup-telemetry", 0.57, 0.18, 0.42, 0.40),
+         ("specimen-01", "closeup-selector", 0.02, 0.70, 0.56, 0.18)]
 
 
 def monitor_rect():
@@ -33,6 +33,7 @@ def monitor_rect():
 
 def main() -> int:
     os.makedirs(OUT, exist_ok=True)
+    original = json.loads(hypr("-j", "activeworkspace"))["id"]
     dsp("hl.dsp.focus({ workspace = '9' })"); settle(0.6)
     mx, my, mw, mh = monitor_rect()
     print(f"monitor logical {mw}x{mh}")
@@ -70,7 +71,7 @@ def main() -> int:
             except subprocess.TimeoutExpired: proc.kill()
             settle(0.4)
     _write_crops()
-    hypr("dispatch", "hl.dsp.focus({ workspace = '1' })")
+    hypr("dispatch", f"hl.dsp.focus({{ workspace = '{original}' }})")
     return 0
 
 

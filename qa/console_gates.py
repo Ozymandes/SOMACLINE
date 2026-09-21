@@ -258,11 +258,12 @@ def gate6_selector() -> tuple[bool, list[str]]:
     else:
         print("  key sprites absent — run tools/build_sprites.py")
 
-    # layout may not import ui, so it carries the bank aspect as a constant.
-    # If the two drift, every control row is mis-sized. Assert they agree.
-    if abs(L_BANK_ASPECT - SEL.natural_aspect()) > 0.01:
+    # layout may not import skin, so it carries the selector module's aspect
+    # as a constant. If the two drift the plate is mis-sized. Assert they agree.
+    from abyssal.skin.modules import SELECTOR
+    if abs(L_BANK_ASPECT - SELECTOR.aspect) > 1e-9:
         bad.append(f"layout._BANK_ASPECT {L_BANK_ASPECT} != "
-                   f"selector.natural_aspect() {SEL.natural_aspect():.3f}")
+                   f"SELECTOR.aspect {SELECTOR.aspect:.4f}")
 
     # The keys are raster plates: one uniform scale, always.
     for w, h in SIZES:

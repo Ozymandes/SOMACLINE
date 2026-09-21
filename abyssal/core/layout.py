@@ -22,6 +22,10 @@ class LayoutState(Enum):
     ARCHIVE = "ARCHIVE"
 
 
+#: Aspect range in which the six-module machine is used at all.
+_SIX_MAX_ASPECT = 2.2
+_SIX_MIN_ASPECT = 0.72
+
 # Breakpoints on logical widget width, in px.
 BP_INSTRUMENT = 700
 BP_ARCHIVE = 1100
@@ -111,6 +115,12 @@ def classify(width: float, height: float) -> LayoutState:
     layout with no vertical room would push the organism to nothing.
     """
     effective = width
+    # The six-module machine is a ~4:3 object. Far outside its proportions
+    # it could only be letterboxed or smeared, so those windows get the
+    # portable configuration instead.
+    aspect = width / max(height, 1.0)
+    if aspect > _SIX_MAX_ASPECT or aspect < _SIX_MIN_ASPECT:
+        return LayoutState.COMPACT
     if height < 420:
         effective = min(effective, BP_INSTRUMENT - 1)
     if height < 560:
@@ -122,168 +132,170 @@ def classify(width: float, height: float) -> LayoutState:
     return LayoutState.ARCHIVE
 
 
-# Per-state arrangement metrics: padding, header height, readout row height,
-# readout column width bounds, gap, and the minimum stage edge worth keeping.
-_METRICS = {
-    LayoutState.COMPACT:    dict(pad=12.0, head=34.0, row=46.0,
-                                 col=(112.0, 190.0), gap=8.0, min_stage=90.0),
-    LayoutState.INSTRUMENT: dict(pad=20.0, head=104.0, row=62.0,
-                                 col=(170.0, 330.0), gap=18.0, min_stage=150.0),
-    LayoutState.ARCHIVE:    dict(pad=30.0, head=122.0, row=74.0,
-                                 col=(230.0, 460.0), gap=26.0, min_stage=200.0),
-}
+# --- the six-module machine -------------------------------------------------
+# Module rectangles read off references/Abbysal_Final.png (1448x1086), in that
+# image's pixels. The six-module arrangement is laid out FROM these numbers:
+# vertical positions follow the chassis height, horizontal ones the chassis
+# width, and the telemetry rack keeps its manufactured proportions (it is
+# sized from the height scale) so its bays never smear. The observation
+# column absorbs whatever width is left - that is the one region of the
+# machine that is a frame rather than an arrangement.
+REF_CHASSIS = (40.0, 30.0, 1368.0, 1028.0)
+REF_HEADER = (55.0, 55.0, 1340.0, 145.0)
+REF_STAGE = (52.0, 222.0, 770.0, 568.0)
+REF_SELECTOR = (52.0, 800.0, 770.0, 152.0)
+REF_RACK = (838.0, 222.0, 534.0, 730.0)
+REF_FOOTER = (48.0, 962.0, 1350.0, 78.0)
 
-# Above this body aspect the readouts move to a side column, so the organism
-# keeps a stage close to square instead of a wide letterboxed strip. This is
-# what makes a short wide Hyprland tile look deliberate rather than starved.
-SIDE_COLUMN_ASPECT = 1.45
-
-# The specimen bank spans the observation bezel and sits directly beneath it,
-# so the glass and the five engraved creature keys read as ONE assembly. It is
-# therefore sized from the STAGE width, not the window width.
-#
-# _BANK_ASPECT is the trough's width/height at the bank's natural proportions
-# and must equal `ui.selector.natural_aspect()`; qa/console_gates.py asserts
-# that. It lives here as a constant because layout may not import ui.
-_BANK_ASPECT = 5.313
-_BANK_SHARE = 1.00          # of stage width: the trough spans the bezel
-#: Seam between the observation bezel and the selector trough, in px.
-_BANK_SEAM = 3.0
-_BANK_MIN_H = 34.0
-_BANK_MAX_H = {"COMPACT": 78.0, "INSTRUMENT": 114.0, "ARCHIVE": 152.0}
-_FOOTER_H = {"COMPACT": 0.0, "INSTRUMENT": 44.0, "ARCHIVE": 68.0}
+#: Natural width/height of the selector module (1400x264). Layout may not
+#: import skin/, so the aspect is a constant; qa/console_gates.py GATE 6
+#: asserts it equals skin.modules.SELECTOR.aspect.
+_BANK_ASPECT = 1400.0 / 264.0
+#: The widest the observation window may become before the rack takes the
+#: extra width instead (ARCHIVE on a 16:9 panel).
+_STAGE_MAX_ASPECT = 1.62
+#: The rack may never take more than this share of the chassis width.
+_RACK_MAX_SHARE = 0.44
+_RACK_MIN_SHARE = 0.30
 
 # --- outer chassis ---------------------------------------------------------
-# Proportions read off monitor_ref.png (1672x941): the enclosure takes ~3.3% of
-# the width per side and ~2% of the height, leaving a 1560x900 inner face. The
-# frame is what makes the UI read as ONE machine rather than floating panels,
-# so it is only dropped when the window is too small to spend the pixels.
-_CHASSIS_MIN_W = 620.0
-_CHASSIS_MIN_H = 460.0
-_CHASSIS_MX = 0.026        # of width, per side
-_CHASSIS_MY = 0.030        # of height, per side
-_CHASSIS_WALL = 0.020      # frame thickness as a share of min(w, h)
+# The enclosure's margin inside the window matches the reference's: ~2.8% of
+# each dimension. The frame is what makes the UI read as ONE machine, so it is
+# only dropped when the window is too small to spend the pixels.
+_CHASSIS_MIN_W = 420.0
+_CHASSIS_MIN_H = 330.0
+_CHASSIS_MX = 40.0 / 1448.0
+_CHASSIS_MY = 30.0 / 1086.0
 
-# Reference body split: stage 60.6%, rack 39.4% of the inner width.
-_STAGE_SHARE = 0.605
-_RACK_MIN = 230.0
-_RACK_MAX = 560.0
+#: COMPACT arrangement: header rail and telemetry strip heights, in px.
+_COMPACT_HEAD = 38.0
+_COMPACT_STRIP = 52.0
 
 
 def bank_height(state: "LayoutState", stage_w: float, avail_h: float) -> float:
-    """Pure: how tall the control strip should be. Shared by layout and QA."""
-    want = (stage_w * _BANK_SHARE) / _BANK_ASPECT
-    hi = min(_BANK_MAX_H[state.value], avail_h)
-    if hi < _BANK_MIN_H:
+    """Pure: how tall the selector module is for a given column width."""
+    if state is LayoutState.COMPACT:
         return 0.0
-    return max(_BANK_MIN_H, min(want, hi))
+    return max(0.0, min(stage_w / _BANK_ASPECT, avail_h))
 
 
 def resolve(width: float, height: float) -> Layout:
     w = max(float(width), 1.0)
     h = max(float(height), 1.0)
     state = classify(w, h)
-    m = _METRICS[state]
     t = {LayoutState.COMPACT: _T_COMPACT,
          LayoutState.INSTRUMENT: _T_INSTRUMENT,
          LayoutState.ARCHIVE: _T_ARCHIVE}[state]
+    if state is LayoutState.COMPACT:
+        return _compact(w, h, t)
+    return _six_module(w, h, state, t)
 
-    # --- outer enclosure ---------------------------------------------------
-    show_chassis = w >= _CHASSIS_MIN_W and h >= _CHASSIS_MIN_H
-    if show_chassis:
-        mx, my = w * _CHASSIS_MX, h * _CHASSIS_MY
-        chassis = Rect(mx, my, w - 2 * mx, h - 2 * my)
-        wall = max(10.0, min(chassis.w, chassis.h) * _CHASSIS_WALL)
-        content = chassis.inset(wall, wall)
-        pad = 0.0
-    else:
-        chassis = Rect(0.0, 0.0, 0.0, 0.0)
-        pad = m["pad"]
-        content = Rect(pad, pad, max(0.0, w - 2 * pad), max(0.0, h - 2 * pad))
 
-    gap = m["gap"]
+_NONE = Rect(0.0, 0.0, 0.0, 0.0)
 
-    # --- header, with its secondary status rail ----------------------------
-    head_h = min(m["head"], content.h * 0.22)
-    header = Rect(content.x, content.y, content.w, head_h)
-    status = Rect(0.0, 0.0, 0.0, 0.0)
-    show_status = False
-    if show_chassis and head_h >= 58.0 and content.w > 620.0:
-        # The reference splits its header into a tall title block and a short
-        # status rail beneath it. Both are compartmented; see ui.console.
-        srow = head_h * 0.30
-        header = Rect(header.x, header.y, header.w, head_h - srow)
-        status = Rect(content.x, header.bottom, content.w, srow)
-        show_status = True
 
-    body_top = (status.bottom if show_status else header.bottom) + gap * 0.55
-    body = Rect(content.x, body_top, content.w,
-                max(0.0, content.bottom - body_top))
+#: Type measured off references/Abbysal_Final.png at its own scale (s = 1),
+#: in px: header title, specimen name, epithet base, rack/section label,
+#: microcopy, tracking. The six-module states scale these with the machine,
+#: because the machine's bays scale with it; every call site still clamps to
+#: its own bay, so type can never outgrow the recess it sits in.
+_REF_TYPE = dict(title=18.0, specimen=26.0, subtitle=16.0, label=14.5,
+                 value=30.0, micro=12.5, tracking=2.6)
 
-    # --- archive rail ------------------------------------------------------
-    foot_h = _FOOTER_H[state.value]
-    if foot_h > 0.0 and body.h > foot_h * 5.0:
-        footer = Rect(body.x, body.bottom - foot_h, body.w, foot_h)
-        body = Rect(body.x, body.y, body.w, body.h - foot_h - gap * 0.45)
-        show_footer = True
-    else:
-        footer = Rect(0.0, 0.0, 0.0, 0.0)
-        show_footer = False
 
-    # --- stage / telemetry split -------------------------------------------
-    aspect = body.w / max(body.h, 1.0)
-    col_lo, col_hi = m["col"]
-    use_column = False
-    col_w = 0.0
-    if aspect >= SIDE_COLUMN_ASPECT and body.w > col_lo + m["min_stage"] + gap:
-        if show_chassis:
-            # Follow the reference proportions rather than a fixed width, so
-            # the rack grows with the machine instead of stranding the stage
-            # in a letterbox.
-            col_w = min(_RACK_MAX, max(_RACK_MIN,
-                                       body.w * (1.0 - _STAGE_SHARE) - gap))
-        else:
-            col_w = min(col_hi, max(col_lo, body.w * 0.33))
-        if body.w - col_w - gap >= m["min_stage"]:
-            use_column = True
+def _machine_type(s: float, base: TypeScale) -> TypeScale:
+    k = max(0.5, min(1.9, s))
+    r = _REF_TYPE
+    return TypeScale(title=r["title"] * k, specimen=r["specimen"] * k,
+                     subtitle=r["subtitle"] * k, label=r["label"] * k,
+                     value=r["value"] * k, micro=max(7.0, r["micro"] * k),
+                     tracking=max(1.0, r["tracking"] * k))
 
-    if use_column:
-        readout = Rect(body.right - col_w, body.y, col_w, body.h)
-        stage = Rect(body.x, body.y, body.w - col_w - gap, body.h)
-    else:
-        row_h = min(m["row"], body.h * 0.26)
-        readout = Rect(body.x, body.bottom - row_h, body.w, row_h)
-        stage = Rect(body.x, body.y, body.w, max(0.0, body.h - row_h - gap * 0.6))
 
-    # --- selector bank, carved from the stage column -----------------------
-    bank_h = bank_height(state, stage.w, stage.h * 0.30)
-    # The selector trough is BOLTED TO the observation bezel, not parked below
-    # it. A generous gap made the two read as separate objects that happened
-    # to be stacked; a hairline reads as one assembly, and the trough draws
-    # its own transition lip into that seam.
-    if bank_h > 0.0 and stage.h - bank_h - _BANK_SEAM >= m["min_stage"]:
-        controls = Rect(stage.x, stage.bottom - bank_h, stage.w, bank_h)
-        stage = Rect(stage.x, stage.y, stage.w,
-                     max(0.0, stage.h - bank_h - _BANK_SEAM))
-        show_controls = True
-    else:
-        controls = Rect(0.0, 0.0, 0.0, 0.0)
-        show_controls = False
+def _six_module(w: float, h: float, state: LayoutState, t: TypeScale) -> Layout:
+    """INSTRUMENT / ARCHIVE: the full six-module machine."""
+    C = Rect(w * _CHASSIS_MX, h * _CHASSIS_MY,
+             w * (1.0 - 2.0 * _CHASSIS_MX), h * (1.0 - 2.0 * _CHASSIS_MY))
+    rx, ry, rw, rh = REF_CHASSIS
+    sx, sy = C.w / rw, C.h / rh
+    s = min(sx, sy)
+    t = _machine_type(s, t)
 
-    # ARCHIVE keeps a quiet metadata block at the top of its side column.
-    show_meta = state is LayoutState.ARCHIVE and use_column and readout.h > 300.0
-    meta = Rect(0.0, 0.0, 0.0, 0.0)
+    def X(v: float) -> float:
+        return C.x + (v - rx) * sx
+
+    def Y(v: float) -> float:
+        return C.y + (v - ry) * sy
+
+    hx, hy, hw, hh = REF_HEADER
+    header = Rect(X(hx), Y(hy), hw * sx, hh * sy)
+    fx, fy, fw, fh = REF_FOOTER
+    footer = Rect(X(fx), Y(fy), fw * sx, fh * sy)
+
+    body_top = Y(REF_STAGE[1])
+    body_bot = Y(REF_RACK[1] + REF_RACK[3])
+    body_h = body_bot - body_top
+
+    # Rack: manufactured proportions from the HEIGHT scale, then the right
+    # margin exactly as the reference seats it (36 px of 1368).
+    margin_r = (rx + rw - (REF_RACK[0] + REF_RACK[2])) * s
+    left = X(REF_STAGE[0])
+    gap = (REF_RACK[0] - (REF_STAGE[0] + REF_STAGE[2])) * s
+    rack_w = REF_RACK[2] * sy
+    col_w = C.right - margin_r - rack_w - gap - left
+    # the observation window may not become a letterbox: past this aspect the
+    # rack takes the width instead
+    stage_h_est = body_h * (REF_STAGE[3] / (REF_RACK[3]))
+    if col_w > stage_h_est * _STAGE_MAX_ASPECT:
+        col_w = stage_h_est * _STAGE_MAX_ASPECT
+    rack_w = C.right - margin_r - gap - left - col_w
+    rack_w = max(C.w * _RACK_MIN_SHARE, min(C.w * _RACK_MAX_SHARE, rack_w))
+    col_w = C.right - margin_r - rack_w - gap - left
+    readout = Rect(C.right - margin_r - rack_w, body_top, rack_w, body_h)
+
+    # Selector: its own aspect, never stretched vertically. The keys grow
+    # with the column (up to a limit) rather than the plate smearing.
+    sel_gap = (REF_SELECTOR[1] - (REF_STAGE[1] + REF_STAGE[3])) * sy
+    sel_h = bank_height(state, col_w, REF_SELECTOR[3] * sy * 1.30)
+    controls = Rect(left, body_bot - sel_h, col_w, sel_h)
+    stage = Rect(left, body_top, col_w,
+                 max(0.0, controls.y - sel_gap - body_top))
 
     return Layout(
-        state=state, width=w, height=h, pad=pad,
-        header=header, stage=stage, readout=readout, meta=meta,
-        controls=controls, footer=footer, chassis=chassis, status=status,
-        type=t,
-        show_subtitle=(state is not LayoutState.COMPACT and content.w > 360.0),
-        show_meta=False,
-        show_controls=show_controls,
-        show_footer=show_footer,
-        show_chassis=show_chassis,
-        show_status=show_status,
-        readout_vertical=use_column,
-    )
+        state=state, width=w, height=h, pad=0.0,
+        header=header, stage=stage, readout=readout, meta=_NONE,
+        controls=controls, footer=footer, chassis=C, status=_NONE,
+        type=t, show_subtitle=True, show_meta=False,
+        show_controls=sel_h > 20.0, show_footer=True, show_chassis=True,
+        show_status=False, readout_vertical=True)
+
+
+def _compact(w: float, h: float, t: TypeScale) -> Layout:
+    """COMPACT: a portable configuration, not a crushed machine.
+
+    Minimal header, the observation chamber, a clean telemetry strip. There is
+    no selector bank here - keys 1-5 and the arrows still switch specimens.
+    """
+    show_chassis = w >= _CHASSIS_MIN_W and h >= _CHASSIS_MIN_H
+    if show_chassis:
+        C = Rect(w * _CHASSIS_MX, h * _CHASSIS_MY,
+                 w * (1.0 - 2.0 * _CHASSIS_MX), h * (1.0 - 2.0 * _CHASSIS_MY))
+        wall = max(8.0, min(C.w, C.h) * 0.030)
+        content = C.inset(wall, wall)
+    else:
+        C = _NONE
+        content = Rect(8.0, 8.0, max(0.0, w - 16.0), max(0.0, h - 16.0))
+    gap = 6.0
+    head_h = min(_COMPACT_HEAD, content.h * 0.16)
+    header = Rect(content.x, content.y, content.w, head_h)
+    strip_h = min(_COMPACT_STRIP, content.h * 0.20)
+    readout = Rect(content.x, content.bottom - strip_h, content.w, strip_h)
+    stage = Rect(content.x, header.bottom + gap, content.w,
+                 max(0.0, readout.y - gap - header.bottom - gap))
+    return Layout(
+        state=LayoutState.COMPACT, width=w, height=h, pad=8.0,
+        header=header, stage=stage, readout=readout, meta=_NONE,
+        controls=_NONE, footer=_NONE, chassis=C, status=_NONE,
+        type=t, show_subtitle=False, show_meta=False, show_controls=False,
+        show_footer=False, show_chassis=show_chassis, show_status=False,
+        readout_vertical=False)

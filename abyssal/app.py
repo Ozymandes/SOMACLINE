@@ -28,7 +28,10 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+gi.require_version("Graphene", "1.0")
+from collections import OrderedDict  # noqa: E402
+
+from gi.repository import Gdk, Gio, GLib, Graphene, Gtk  # noqa: E402
 
 from .core.layout import LayoutState, resolve
 from .core.lighting import LightField
@@ -39,17 +42,57 @@ from .core.viewport import Viewport, isotropy_error
 from .organism.mathforms import SourceBody as Body
 from .organism.render import draw_calibration, draw_organism
 from .organism.species import CATALOGUE, by_index
+from .telemetry.history import History
 from .telemetry.source import TelemetrySource
+from .skin import hidpi
 from .ui import console
 from .ui.chrome import draw_background
 from .ui.debug import draw_debug
 
 APP_ID = "dev.abyssal.OrganismMonitor"
-TELEMETRY_INTERVAL_MS = 500
+#: Telemetry cadence. /proc and /sys are read here and ONLY here - never at
+#: render rate. 5 Hz gives every 60-second graph 300 samples, more than any
+#: graph well has pixel columns.
+TELEMETRY_HZ = 5.0
+TELEMETRY_INTERVAL_MS = int(1000 / TELEMETRY_HZ)
+
+#: Adaptive draw rate. A system monitor must not become a meaningful source
+#: of the load it measures: the organism is drawn at up to 60 FPS while the
+#: window has focus, 30 while it is visible but unfocused, and not at all
+#: while the compositor reports it suspended (another workspace, minimised,
+#: fully occluded). The frame clock may tick faster (this panel runs at
+#: 80 Hz); ticks between paced frames do no work.
+FPS_FOCUSED = 60.0
+FPS_UNFOCUSED = 30.0
 
 #: How long a selector key stays visibly depressed after a click, in seconds.
 #: Long enough to register as a mechanical action, short enough not to lag.
 PRESS_FEEDBACK_S = 0.13
+
+
+def _grect(x: float, y: float, w: float, h: float) -> Graphene.Rect:
+    return Graphene.Rect().init(x, y, w, h)
+
+
+class MonitorView(Gtk.Widget):
+    """The one widget. It composes its frame with GtkSnapshot.
+
+    Static layers and live regions are handed to GSK as TEXTURES, re-created
+    only when their pixels change - so the GPU keeps them and nothing is
+    re-uploaded per frame. The organism, the only thing that moves at frame
+    rate, is the only per-frame cairo node, and it is clipped to the glass.
+    """
+
+    __gtype_name__ = "AbyssalMonitorView"
+
+    def __init__(self, host: "Monitor") -> None:
+        super().__init__()
+        self.host = host
+        self.set_hexpand(True)
+        self.set_vexpand(True)
+
+    def do_snapshot(self, snapshot) -> None:
+        self.host._on_snapshot(self, snapshot)
 
 
 class Monitor(Gtk.ApplicationWindow):
@@ -72,8 +115,10 @@ class Monitor(Gtk.ApplicationWindow):
         self.telemetry = Telemetry()
 
         # --- console presentation state --------------------------------------
+        self.history = History(TELEMETRY_HZ)
         self.model = console.ConsoleModel(species=by_index(self.species_index),
-                                          active=self.species_index)
+                                          active=self.species_index,
+                                          history=self.history)
         self.light = LightField()
         self._press_until = 0.0
         self._press_index: int | None = None
@@ -89,6 +134,11 @@ class Monitor(Gtk.ApplicationWindow):
         self._frame_ms = 0.0
         self._sim_ms = 0.0
         self._draw_ms = 0.0
+        self._tel_ms = 0.0
+        self._cadence = FPS_FOCUSED
+        self._next_us = 0.0
+        self._draw_acc = 0.0
+        self._draw_avg = 0.0
         self._fps_accum = 0
         self._fps_t0 = time.perf_counter()
         self._last_tick_us = 0
@@ -97,11 +147,11 @@ class Monitor(Gtk.ApplicationWindow):
         self._probe = open(opts.probe, "a", buffering=1) if opts.probe else None
 
         # --- the one and only widget
-        self.area = Gtk.DrawingArea()
-        self.area.set_hexpand(True)
-        self.area.set_vexpand(True)
-        self.area.set_draw_func(self._on_draw)
+        self.area = MonitorView(self)
         self.set_child(self.area)
+        #: surface -> texture, keyed by the surface object itself (held, so
+        #: its id cannot be reused while cached). Bounded.
+        self._textures: "OrderedDict[int, tuple]" = OrderedDict()
 
         self._last_layout = None
         self._last_vp = None
@@ -222,7 +272,20 @@ class Monitor(Gtk.ApplicationWindow):
     def _on_telemetry(self) -> bool:
         # Telemetry only feeds the physiology smoother and the readout strings.
         # It can never change layout geometry, so a sample can never move the UI.
-        self.telemetry = self.telemetry_src.sample()
+        t0 = time.perf_counter()
+        tel = self.telemetry_src.sample()
+        if self.opts.qa_temp:
+            # QA only (--qa-temp): substitute the temperature READING so the
+            # thermal states can be photographed on a cool machine. Every other
+            # channel stays live; nothing is drawn differently.
+            from dataclasses import replace
+            tel = replace(tel, temp_c=self.opts.qa_temp, temp_available=True,
+                          temperature=max(0.0, min(1.0, (self.opts.qa_temp - 30.0) / 65.0)))
+        self.telemetry = tel
+        self.history.push(tel.cpu_pct,
+                          tel.temp_c if tel.temp_available else None,
+                          tel.mem_used_gb, self._frame_ms)
+        self._tel_ms = (time.perf_counter() - t0) * 1000.0
         return GLib.SOURCE_CONTINUE
 
     def _on_probe_sample(self) -> bool:
@@ -233,8 +296,40 @@ class Monitor(Gtk.ApplicationWindow):
         return GLib.SOURCE_CONTINUE
 
     # ------------------------------------------------------------- frame loop
+    def cadence(self) -> float:
+        """Target frames per second for the current window state; 0 = idle."""
+        if self._suspended():
+            return 0.0
+        if self.opts.fps_cap > 0:
+            return self.opts.fps_cap
+        return FPS_FOCUSED if self.is_active() else FPS_UNFOCUSED
+
+    def _suspended(self) -> bool:
+        try:
+            st = self.get_surface().get_state()
+            return bool(st & Gdk.ToplevelState.SUSPENDED)
+        except Exception:
+            return False
+
     def _on_tick(self, _widget, clock: Gdk.FrameClock) -> bool:
         now_us = clock.get_frame_time()
+        fps = self.cadence()
+        self._cadence = fps
+        if fps <= 0.0:
+            # Nothing is looking: no simulation, no draw. The next visible
+            # tick resumes with a clamped dt, so nothing teleports.
+            return GLib.SOURCE_CONTINUE
+        interval_us = 1_000_000.0 / fps
+        # Pace on a fixed schedule (a phase accumulator), not on "time since
+        # the last frame": the latter aliases - frame-time jitter makes some
+        # gaps look short, and a 60 FPS target on a 120 Hz panel collapses
+        # to 40. Half a refresh of tolerance takes the nearest tick.
+        tol = min(interval_us * 0.5, 4000.0)
+        if self._next_us and now_us < self._next_us - tol:
+            return GLib.SOURCE_CONTINUE
+        self._next_us = (self._next_us + interval_us
+                         if self._next_us and now_us - self._next_us < interval_us
+                         else now_us + interval_us)
         if self._last_tick_us == 0:
             dt = 1.0 / 60.0
         else:
@@ -253,8 +348,37 @@ class Monitor(Gtk.ApplicationWindow):
         return GLib.SOURCE_CONTINUE
 
     # ------------------------------------------------------------------- draw
-    def _on_draw(self, area: Gtk.DrawingArea, cr, width: int, height: int) -> None:
+    def _texture(self, surf) -> Gdk.Texture:
+        key = id(surf)
+        hit = self._textures.get(key)
+        if hit is not None and hit[0] is surf:
+            self._textures.move_to_end(key)
+            return hit[1]
+        surf.flush()
+        # cairo ARGB32 is native-endian premultiplied: B,G,R,A in memory here
+        tex = Gdk.MemoryTexture.new(
+            surf.get_width(), surf.get_height(),
+            Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED,
+            GLib.Bytes.new(bytes(surf.get_data())), surf.get_stride())
+        self._textures[key] = (surf, tex)
+        while len(self._textures) > 8:
+            self._textures.popitem(last=False)
+        return tex
+
+    def _device_scale(self) -> float:
+        try:
+            return float(self.get_native().get_surface().get_scale())
+        except Exception:
+            return float(self.get_scale_factor())
+
+    def _on_snapshot(self, widget, snapshot) -> None:
+        width, height = widget.get_width(), widget.get_height()
+        if width < 1 or height < 1:
+            return
         t0 = time.perf_counter()
+        # Every derived-pixel cache allocates at the surface's device scale.
+        hidpi.set_scale(self._device_scale())
+        ds = hidpi.scale()
 
         # THE ENTIRE RESIZE RESPONSE, IN FULL:
         layout = resolve(width, height)
@@ -276,27 +400,39 @@ class Monitor(Gtk.ApplicationWindow):
         if self._press_index is not None and time.perf_counter() >= self._press_until:
             self._press_index = None
         self.model.pressed = self._press_index
-
         self._refresh_field(vp)
 
-        # draw_background is painted INTO the cached static under-layer;
-        # see ui.console.draw_under.
-        console.draw_under(cr, layout, self.model, vp.scale)
-        if layout.stage.valid:
-            glass = console.stage_content(layout)
-            cr.save()
+        def put(surf, x=0.0, y=0.0):
+            snapshot.append_texture(
+                self._texture(surf),
+                _grect(x, y, surf.get_width() / ds, surf.get_height() / ds))
+
+        # LAYERS 0-1: background, shell, glass, graticule (static texture)
+        under = console.layer_under(layout, self.model)
+        over = console.layer_over(layout, self.model, self.telemetry)
+        if under is not None:
+            put(under)
+        # LAYER 2: the organism - the only per-frame raster, glass only
+        if glass.valid:
+            cr = snapshot.append_cairo(_grect(glass.x, glass.y, glass.w, glass.h))
             cr.rectangle(glass.x, glass.y, glass.w, glass.h)
             cr.clip()
             draw_organism(cr, vp, self.org)
             if self.show_calibration:
                 draw_calibration(cr, vp, self.org)
-            cr.restore()
-        console.draw_over(cr, layout, self.telemetry, self._fps,
-                          self._frame_ms, self.model, self.light)
+        # LAYER 3: the structural modules and static type (static texture)
+        if over is not None:
+            put(over)
+        # LAYERS 4-6: live regions, each re-rendered only on its own change
+        for reg in console.regions(layout, self.model, self.telemetry,
+                                   self._fps, self._frame_ms, under, over):
+            put(reg.surface, reg.rect.x, reg.rect.y)
 
         self._draw_ms = (time.perf_counter() - t0) * 1000.0
+        self._draw_acc += self._draw_ms
         if self.show_debug:
-            draw_debug(cr, layout, vp, self._debug_info(layout, vp, area))
+            cr = snapshot.append_cairo(_grect(0, 0, width, height))
+            draw_debug(cr, layout, vp, self._debug_info(layout, vp, widget))
 
         self.frames += 1
         self._tick_fps()
@@ -313,20 +449,6 @@ class Monitor(Gtk.ApplicationWindow):
         p = self.phys_model.current
         mdl.phase = (org.time * 0.31) % 2.0
         mdl.rotation = 0.08 + 0.42 * p.agitation
-        # Intensity-weighted centroid of the point cloud, in field
-        # millimetres. It drifts as the creature moves, which is what makes
-        # the COORDINATES reading a reading.
-        try:
-            px, py, pw = org.points()
-            tot = float(pw.sum())
-            if tot > 0.0:
-                cx = float((px * pw).sum()) / tot / 400.0
-                cy = float((py * pw).sum()) / tot / 400.0
-            else:
-                cx = cy = 0.0
-        except Exception:
-            cx = cy = 0.0
-        mdl.coords = (cx, cy, 0.0)
         mdl.behavior = ("AGITATED" if p.agitation > 0.66 else
                         "ACTIVE" if p.agitation > 0.33 else "STABLE")
         mdl.flux = p.flux
@@ -340,6 +462,9 @@ class Monitor(Gtk.ApplicationWindow):
         now = time.perf_counter()
         elapsed = now - self._fps_t0
         if elapsed >= 0.5:
+            # windowed mean, so the probe cannot alias onto one kind of frame
+            self._draw_avg = self._draw_acc / max(1, self._fps_accum)
+            self._draw_acc = 0.0
             self._fps = self._fps_accum / elapsed
             self._frame_ms = (elapsed / self._fps_accum) * 1000.0
             self._fps_accum = 0
@@ -395,6 +520,10 @@ class Monitor(Gtk.ApplicationWindow):
             "fps": self._fps,
             "draw_ms": self._draw_ms,
             "sim_ms": self._sim_ms,
+            "tel_ms": self._tel_ms,
+            "draw_avg_ms": self._draw_avg,
+            "cadence": self._cadence,
+            "active": bool(self.is_active()),
         }) + "\n")
 
 
@@ -430,6 +559,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="append JSONL geometry events (QA harness)")
     ap.add_argument("--quit-after", type=float, default=0.0,
                     help="seconds, for automated runs")
+    ap.add_argument("--qa-temp", type=float, default=0.0,
+                    help="QA: substitute this temperature reading (deg C)")
+    ap.add_argument("--fps-cap", type=float, default=0.0,
+                    help="force a draw rate (QA); 0 = adaptive")
     opts = ap.parse_args(argv if argv is not None else sys.argv[1:])
     return AbyssalApp(opts).run([])
 

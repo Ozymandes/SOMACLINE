@@ -138,7 +138,10 @@ def draw_organism(cr, vp: Viewport, org: SourceBody) -> None:
     # cloud spread over four times the area must be counted four times as
     # strongly, or the creature fades out as the window grows.
     eff = vp.scale * res
-    ink = min(org.src.ink * 0.78 / max(eff * eff * 3.4, 0.02), 3.6)
+    # Exposure: matched to references/Abbysal_Final.png, where the specimen is
+    # the brightest object on the machine. A presentation gain on the counted
+    # density only - the equations and every point position are untouched.
+    ink = min(org.src.ink * 1.20 / max(eff * eff * 3.4, 0.02), 5.0)
     # A trailing species keeps a fraction `r` of every frame, so its
     # accumulator converges to 1/(1-r) times a single frame's count. Divide
     # that back out, or the trail - the species' whole character - saturates

@@ -97,6 +97,9 @@ class BankGeometry:
     #: metal to spare, in which case those controls simply are not fitted.
     aux_l: Rect = Rect(0.0, 0.0, 0.0, 0.0)
     aux_r: Rect = Rect(0.0, 0.0, 0.0, 0.0)
+    #: Top of the engraved label ledge when the mounting plate provides one
+    #: below the key (the six-module selector); 0 means directly under it.
+    ledge_y: float = 0.0
 
     def key_rect(self, i: int) -> Rect:
         return Rect(self.key_x + i * self.pitch, self.key_y,
@@ -105,7 +108,7 @@ class BankGeometry:
     def label_rect(self, i: int) -> Rect:
         """The engraved identifier ledge beneath key `i`."""
         k = self.key_rect(i)
-        return Rect(k.x, k.bottom, k.w, self.ledge)
+        return Rect(k.x, self.ledge_y or k.bottom, k.w, self.ledge)
 
     def lamp_point(self, i: int) -> tuple[float, float, float]:
         """Centre and radius of the key's illuminated strip, for the light pass.
@@ -126,6 +129,27 @@ class BankGeometry:
     @property
     def valid(self) -> bool:
         return self.w > 8.0 and self.key_w > 6.0 and self.key_h > 6.0
+
+
+def from_module(P, n: int = 5) -> BankGeometry:
+    """Key geometry from the placed SELECTOR module's own trued wells. Pure.
+
+    The module's well region scales by ONE factor (its stretch bands lie
+    outside the wells), so the keys keep their authored aspect and one exact
+    pitch by construction.
+    """
+    k0 = P.bay("key_0")
+    k1 = P.bay("key_1")
+    ledge = P.bay("ledge_0")
+    if not k0.valid:
+        return layout(Rect(0.0, 0.0, 0.0, 0.0), n)
+    lh = ledge.h if ledge.h >= _LEDGE_MIN else 0.0
+    r = P.rect
+    return BankGeometry(x=r.x, y=r.y, w=r.w, h=r.h,
+                        key_x=k0.x, key_y=k0.y, key_w=k0.w, key_h=k0.h,
+                        pitch=k1.x - k0.x, ledge=lh, n=n,
+                        aux_l=P.bay("rocker"), aux_r=P.bay("mode"),
+                        ledge_y=ledge.y + (ledge.h - lh) * 0.5)
 
 
 def natural_aspect(n: int = 5) -> float:

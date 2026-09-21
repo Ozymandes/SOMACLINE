@@ -1,39 +1,39 @@
-"""Hardware console assembly: the raster skin with live content drawn into it.
+"""The physical console: six generated hardware modules, live content in them.
 
 WHAT THIS MODULE IS
 -------------------
-`chrome.py` draws the flat instrument. This draws the PHYSICAL one: the
-generated hardware panels, composited scale-safely, with every piece of
-changing information rendered on top in code. Nothing here reads a baked-in
-number, because nothing was baked in.
+The machine is built from exactly six generated modules (skin/modules.py):
+shell, header, observation chamber, telemetry rack, selector, status rail.
+They supply the METAL - frames, bevels, recesses, apertures. Everything that
+changes is drawn here in code, into the recess manufactured for it: nothing
+reads a baked-in number, because nothing was baked in.
 
-ASSEMBLY, NOT STRETCHING
-------------------------
-Only true frames are 9-sliced (see skin/catalog.py). The composite panels of
-the reference machine - the header, the rack, a telemetry module, the selector
-bank - are ARRANGEMENTS. They are rebuilt here from primitives at whatever size
-the layout asks for, which is why they stay sharp at every window size and why
-the asset pass needed no extra corner art.
+COMPOSITION
+-----------
+    layer_under   background, 01 shell, glass, graticule          (static)
+    (host)        the organism, clipped to the glass              (per frame)
+    layer_over    03 bezel, 02 header, 04 rack, 05 selector plate,
+                  06 rail and all static type                     (static)
+    regions()     header clock, rack readouts, selector keys      (on change)
+
+Static layers and regions are cached on their complete inputs, at the display's
+device scale. The live widget hands them to GSK as textures; the headless path
+(draw_under / draw_over) composes the very same surfaces, so a QA frame IS a
+live frame.
 
 GEOMETRY IS SHARED
 ------------------
 `control_geometry` and `stage_content` are pure functions. Drawing, hit testing
-and the QA harness all call them, so the bank you can see and the bank you can
-click are the same bank by construction.
-
-DEGRADATION
------------
-Every sprite draw returns a bool. If `assets/sprites` has not been built the
-panels simply do not appear and the text still renders, so the app remains
-runnable and testable on a bare checkout.
+and the QA gates all call them, so the keys you see and the keys you can click
+are the same keys by construction.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections import OrderedDict, deque
-from dataclasses import dataclass, field
+from collections import OrderedDict
+from dataclasses import dataclass
 
 import cairo
 
@@ -43,19 +43,23 @@ from ..core.lighting import CHARTREUSE as L_CHART
 from ..core.lighting import CYAN as L_CYAN
 from ..core.lighting import LightField
 from ..core.signals import Telemetry
-from ..core.theme import (AMBER, CYAN, INK, INK_BRIGHT, INK_DIM, INK_TECH,
-                          LIME, RULE, rgba)
+from ..core.theme import INK, INK_BRIGHT, INK_DIM, INK_TECH, LIME, RULE, rgba
 from ..organism.species import CATALOGUE, Species
 from ..skin import catalog as C
-from ..skin import fascia as F
-from ..skin.surface import (draw_nine, draw_sprite, draw_sprite_fit,
-                            draw_sprite_rot90, sprite_size)
+from ..skin import hidpi
+from ..skin import modules as MOD
+from ..skin.surface import draw_nine, draw_sprite, draw_sprite_fit
+from ..telemetry.history import History
 from . import segment as SEG
 from . import selector as SEL
 from .chrome import (_cap, _show as _show_raw, _text_w, _W_MEDIUM,
                      _W_NORMAL, draw_background)
 
 TAU = math.tau
+
+#: Scope graticule ink, measured off the reference field: a cool blue-grey
+#: that reads clearly against the glass without competing with the specimen.
+SCOPE = (0.36, 0.52, 0.62)
 
 #: A throwaway context for geometry helpers that both measure and draw. Asking
 #: them to measure against this costs one 1x1 surface for the life of the
@@ -94,7 +98,7 @@ def _show(cr, text: str, size: float, weight: int, tracking: float,
         return 0.0
     key = (text, round(size, 2), weight, round(tracking, 3), align,
            round(max_w, 1), round(rgb[0], 3), round(rgb[1], 3),
-           round(rgb[2], 3), round(alpha, 3))
+           round(rgb[2], 3), round(alpha, 3), hidpi.scale())
     ent = _TXT.get(key)
     if ent is None:
         w = _text_w(text, size, weight, tracking)
@@ -104,7 +108,7 @@ def _show(cr, text: str, size: float, weight: int, tracking: float,
         base_in = size * 1.7
         sw = max(1, int(w + pad * 2.0))
         sh = max(1, int(base_in + size * 1.1 + pad))
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, sw, sh)
+        surf = hidpi.surface(sw, sh)
         c2 = cairo.Context(surf)
         _show_raw(c2, text, size, weight, tracking, pad, base_in,
                   rgb, alpha, "l", max_w)
@@ -132,25 +136,6 @@ def _show(cr, text: str, size: float, weight: int, tracking: float,
 # --------------------------------------------------------------------------
 # live history
 # --------------------------------------------------------------------------
-class Trace:
-    """Fixed-length ring of recent values, for the sparkline wells.
-
-    Bounded and preallocated: a long session cannot grow it, and sampling is
-    O(1). Values are normalised 0..1 by the caller.
-    """
-
-    __slots__ = ("_v", "n")
-
-    def __init__(self, n: int = 96) -> None:
-        self.n = n
-        self._v: deque[float] = deque([0.0] * n, maxlen=n)
-
-    def push(self, v: float) -> None:
-        self._v.append(0.0 if v < 0.0 else (1.0 if v > 1.0 else float(v)))
-
-    @property
-    def values(self) -> list[float]:
-        return list(self._v)
 
 
 @dataclass
@@ -164,8 +149,10 @@ class ConsoleModel:
     mode_state: str = "armed"
     cycle_state: str = "neutral"
     disabled: frozenset[int] = frozenset()
-    traces: dict[str, Trace] = field(default_factory=dict)
     switches: int = 0
+    #: 60 s of telemetry at the telemetry cadence, owned by the host. The
+    #: graphs read it; nothing in the draw path writes to it.
+    history: History | None = None
 
     # Live observation-field values. Set by the host each frame; every one of
     # these is rendered in code, never baked into the glass.
@@ -179,12 +166,6 @@ class ConsoleModel:
     flux: float = 0.0
     surge: float = 0.0
 
-    def trace(self, key: str) -> Trace:
-        t = self.traces.get(key)
-        if t is None:
-            t = Trace()
-            self.traces[key] = t
-        return t
 
 
 # --------------------------------------------------------------------------
@@ -199,24 +180,13 @@ def control_geometry(L: Layout) -> tuple[SEL.BankGeometry, Rect]:
     """
     if not L.show_controls or not L.controls.valid:
         return (SEL.layout(Rect(0, 0, 0, 0)), Rect(0, 0, 0, 0))
-    geo = SEL.layout(L.controls, n=len(CATALOGUE))
+    geo = SEL.from_module(MOD.SELECTOR.place(L.controls), n=len(CATALOGUE))
     return (geo, geo.aux_r)
 
 
 def cycle_rect(geo, mode: Rect) -> Rect:
     """The two-way cycle rocker, seated in the trough's left end."""
     return geo.aux_l if geo.valid else Rect(0.0, 0.0, 0.0, 0.0)
-
-
-def stage_frame(L: Layout):
-    """The frame surrounding the specimen field.
-
-    Always the observation bezel: `skin.surface` guarantees a minimum stretched
-    middle, so the bezel stays usable at small stages instead of closing over
-    its own viewport. A plate cannot substitute here - its centre is opaque
-    metal and would hide the organism entirely.
-    """
-    return C.OBSERVATION_BEZEL
 
 
 def stage_content(L: Layout) -> Rect:
@@ -228,8 +198,7 @@ def stage_content(L: Layout) -> Rect:
     s = L.stage
     if not s.valid:
         return s
-    x, y, w, h = stage_frame(L).content(s.x, s.y, s.w, s.h)
-    return Rect(x, y, w, h)
+    return MOD.OBSERVATION.place(s).bay("aperture")
 
 
 def hit_controls(L: Layout, px: float, py: float):
@@ -254,27 +223,6 @@ def hit_controls(L: Layout, px: float, py: float):
 # --------------------------------------------------------------------------
 # small drawing primitives
 # --------------------------------------------------------------------------
-def _sparkline(cr, r: Rect, vals: list[float], rgb, alpha: float = 0.92) -> None:
-    """Non-baked trace: every point comes from live telemetry."""
-    if r.w < 6.0 or r.h < 4.0 or len(vals) < 2:
-        return
-    cr.save()
-    cr.rectangle(r.x, r.y, r.w, r.h)
-    cr.clip()
-    n = len(vals)
-    dx = r.w / (n - 1)
-    cr.set_line_width(max(1.0, r.h * 0.035))
-    cr.set_line_join(1)
-    cr.set_source_rgba(*rgba(rgb, alpha))
-    for i, v in enumerate(vals):
-        px = r.x + i * dx
-        py = r.bottom - v * r.h * 0.92 - r.h * 0.04
-        if i == 0:
-            cr.move_to(px, py)
-        else:
-            cr.line_to(px, py)
-    cr.stroke()
-    cr.restore()
 
 
 def _bargraph(cr, r: Rect, level: float, rgb, segments: int = 28) -> None:
@@ -314,17 +262,17 @@ def _rings(cr, cx: float, cy: float, rad: float, alpha: float) -> None:
     """
     if rad < 8.0:
         return
-    key = (int(round(rad)), round(alpha, 2))
+    key = (int(round(rad)), round(alpha, 2), hidpi.scale())
     surf = _RING_CACHE.get(key)
     side = int(rad * 2.0) + 4
     if surf is None:
-        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, side, side)
+        surf = hidpi.surface(side, side)
         c2 = cairo.Context(surf)
         c2.set_line_width(1.0)
         mid = side * 0.5
         for k in (0.22, 0.42, 0.62, 0.81, 1.0):
             c2.save()
-            c2.set_source_rgba(*rgba(RULE, (0.72 if k == 1.0 else 0.50) * alpha))
+            c2.set_source_rgba(*rgba(SCOPE, (0.55 if k == 1.0 else 0.36) * alpha))
             c2.set_dash([1.6, 5.0])
             c2.arc(mid, mid, rad * k, 0.0, TAU)
             c2.stroke()
@@ -341,7 +289,8 @@ def _rings(cr, cx: float, cy: float, rad: float, alpha: float) -> None:
     cr.restore()
 
 
-def _polar_grid(cr, sc: "Scope", r: Rect, alpha: float = 1.0, t=None) -> None:
+def _polar_grid(cr, sc: "Scope", r: Rect, alpha: float = 1.0, t=None,
+                x_min: float = -1e9) -> None:
     """Observation graticule, drawn CONCENTRIC WITH THE SPECIMEN.
 
     The rings, axes, ticks and cardinal marks are built from the scope - the
@@ -361,15 +310,17 @@ def _polar_grid(cr, sc: "Scope", r: Rect, alpha: float = 1.0, t=None) -> None:
     _rings(cr, cx, cy, rad, alpha)
 
     # axes reach the field edges, as an instrument's crosshair does
-    cr.set_source_rgba(*rgba(RULE, 0.85 * alpha))
-    cr.move_to(max(r.x, sc.axis_x0), round(cy) + 0.5)
+    cr.set_source_rgba(*rgba(SCOPE, 0.62 * alpha))
+    # The X axis starts after the radius ruler's gutter: it must never run
+    # through the ruler's own labels.
+    cr.move_to(max(r.x, sc.axis_x0, x_min), round(cy) + 0.5)
     cr.line_to(min(r.right, sc.axis_x1), round(cy) + 0.5)
     cr.move_to(round(cx) + 0.5, max(r.y, sc.axis_y0))
     cr.line_to(round(cx) + 0.5, min(r.bottom, sc.axis_y1))
     cr.stroke()
 
     # regular ticks along both axes, pitched off the design radius
-    cr.set_source_rgba(*rgba(RULE, 0.95 * alpha))
+    cr.set_source_rgba(*rgba(SCOPE, 0.80 * alpha))
     step = rad * 0.2
     n = int(max(sc.axis_x1 - cx, sc.axis_y1 - cy) / step)
     for i in range(1, n + 1):
@@ -377,7 +328,8 @@ def _polar_grid(cr, sc: "Scope", r: Rect, alpha: float = 1.0, t=None) -> None:
         tk = 3.0 if i % 5 else 5.5
         for sx in (-1, 1):
             px = cx + sx * d
-            if r.x < px < r.right and sc.axis_x0 <= px <= sc.axis_x1:
+            if (r.x < px < r.right and sc.axis_x0 <= px <= sc.axis_x1
+                    and px > x_min):
                 cr.move_to(round(px) + 0.5, cy - tk)
                 cr.line_to(round(px) + 0.5, cy + tk)
             py = cy + sx * d
@@ -414,8 +366,8 @@ def _cardinals(cr, sc: "Scope", r: Rect, t, gutter: float = 0.0,
             ("X-", x_lo + pad, sc.cy, "l", sc.cy - _cap(sz) * 0.55),
             ("X+", min(r.right, sc.axis_x1) - pad, sc.cy, "r",
              sc.cy - _cap(sz) * 0.55)):
-        _show(cr, lab, sz, _W_NORMAL, t.tracking, ax, base, INK_DIM,
-              0.74 * alpha, al)
+        _show(cr, lab, sz, _W_NORMAL, t.tracking, ax, base, INK,
+              0.92 * alpha, al)
 
 
 #: Under this height the recessed plaque is all bevel; use `_rail` instead.
@@ -491,51 +443,32 @@ def _hairline(cr, x0: float, x1: float, y: float, rgb=RULE,
     cr.restore()
 
 
+#: Shell frame scale relative to the chassis: the reference's perimeter is
+#: ~15-25 px on a 1368 px enclosure, and the shell sprite's frame is 97 src px
+#: wide, so its fixed parts are drawn at 0.17 of the chassis scale.
+_SHELL_K = 0.17
+
+
+def shell_k(L: Layout) -> float:
+    c = L.chassis
+    return _SHELL_K * min(c.w / 1368.0, c.h / 1028.0) * (1600.0 / 1368.0) \
+        if L.state is not LayoutState.COMPACT else \
+        max(0.10, min(c.w, c.h) * 0.030 / 97.0)
+
+
 def _draw_chassis(cr, L: Layout) -> None:
-    """The outer enclosure: the thing that makes this read as ONE machine.
+    """MODULE 01: the master shell. The bottom layer of the machine.
 
-    NO CORNER FASTENERS ARE DRAWN HERE.
-    ----------------------------------
-    The panels bolted to this enclosure carry their own. The header fascia has
-    a screw at each of its four corners, the archive rail has four more, the
-    observation bezel has four, and every telemetry module shell has four.
-    Adding a programmatic screw at each chassis corner put a third fastener
-    within ~40px of two real ones, in a vertical line - which is precisely
-    what made the machine read as composited rather than manufactured.
-
-    An enclosure whose panels are visibly bolted down does not also need its
-    own corners bolted to nothing. What is left here is what the chassis
-    genuinely is: a machined plate and a handle rail down each side member.
+    It carries no screws of its own - every fastener on this machine belongs
+    to the child module it holds down - and nothing passes through it.
     """
     c = L.chassis
     if not L.show_chassis or not c.valid:
         return
-    draw_nine(cr, C.PLATE, c.x, c.y, c.w, c.h)
-
-    wall = max(10.0, min(c.w, c.h) * 0.020)
-    inset = wall * 0.78
-    rail_h = c.h * 0.42
-    rail_w = min(wall * 0.62, 15.0)
-    if rail_h > 60.0 and rail_w > 4.0:
-        for rx in (c.x + inset - rail_w * 0.5, c.right - inset - rail_w * 0.5):
-            draw_sprite_rot90(cr, "part/handle", rx, c.cy - rail_h * 0.5,
-                              rail_w, rail_h)
-
-
-def _engrave(cr, text: str, r: Rect, size: float, tracking: float,
-             rgb=INK, align: str = "c", alpha: float = 1.0) -> None:
-    """Label text sitting in a machined recess.
-
-    Drawn twice: a dark offset copy first, so the glyphs read as cut into the
-    metal rather than printed on it.
-    """
-    if not text or r.w < 4.0 or size < 5.0:
-        return
-    x = r.cx if align == "c" else (r.x if align == "l" else r.right)
-    base = r.cy + _cap(size) * 0.5
-    _show(cr, text, size, _W_NORMAL, tracking, x, base + 1.0,
-          (0.02, 0.03, 0.04), 0.75 * alpha, align, r.w)
-    _show(cr, text, size, _W_NORMAL, tracking, x, base, rgb, alpha, align, r.w)
+    if MOD.SHELL.available:
+        MOD.SHELL.draw(cr, c, k=shell_k(L))
+    else:
+        draw_nine(cr, C.PLATE, c.x, c.y, c.w, c.h)
 
 
 # --------------------------------------------------------------------------
@@ -592,6 +525,19 @@ def _elide(text: str, size: float, weight: int, tracking: float,
     return (text[:lo] + "\u2026") if lo else ""
 
 
+def fit_first(cands, size: float, weight: int, tracking: float,
+              max_w: float) -> str:
+    """The longest of `cands` (longest first) that fits `max_w` whole.
+
+    Labels on this machine are shown complete or in a deliberately shorter
+    form - never ellipsised mid-word. Empty string if none fits.
+    """
+    for c in cands:
+        if c and _text_w(c, size, weight, tracking) <= max_w:
+            return c
+    return ""
+
+
 def bay_line(cr, r: Rect, text: str, size: float, weight: int, tracking: float,
              rgb, alpha: float = 1.0, align: str = "l",
              baseline: float | None = None, x: float | None = None,
@@ -640,7 +586,7 @@ def bay_pair(cr, r: Rect, key: str, value: str, size: float, t,
     sz = max(MIN_TEXT, size)
     base = baseline if baseline is not None else (r.cy + _cap(sz) * 0.5)
     kw = _show(cr, key, sz, _W_NORMAL, t.tracking, r.x, base, key_rgb,
-               0.92 * alpha, "l", r.w * 0.62)
+               0.98 * alpha, "l", r.w * 0.62)
     vx = r.x + kw + sz * 0.85
     if r.right - vx > sz:
         bay_line(cr, Rect(vx, r.y, r.right - vx, r.h), value, sz, _W_MEDIUM,
@@ -705,26 +651,27 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
     t = L.type
     sp = m.species
 
-    if sprite_size(F.HEADER.name)[0] == 0 or r.w < 420.0 or r.h < 34.0:
-        _draw_header_compact(cr, L, r, m, light)
+    if (not MOD.HEADER.available or L.state is LayoutState.COMPACT
+            or r.w < 420.0 or r.h < 34.0):
+        _draw_header_compact(cr, L, r, m, light, static, live)
         return
 
-    P = F.HEADER.place(r) if not static else F.HEADER.draw(cr, r)
+    P = MOD.HEADER.place(r) if not static else MOD.HEADER.draw(cr, r)
 
     # --- bay 1: instrument name over specimen name ------------------------
     b = bay_inner(P.bay("title")) if static else Rect(0, 0, 0, 0)
     if b.valid:
         two = b.h >= 26.0
-        name_sz = min(t.specimen, b.h * (0.50 if two else 0.86))
-        title_sz = min(t.title, b.h * 0.27)
+        name_sz = min(t.specimen, b.h * (0.46 if two else 0.86))
+        title_sz = min(t.title, b.h * 0.30)
         if two:
             stack = _cap(title_sz) * 1.20 + _cap(name_sz) * 1.36
             top = b.y + max(0.0, (b.h - stack) * 0.5)
             bay_line(cr, b, "ABYSSAL ORGANISM MONITOR", title_sz, _W_NORMAL,
-                     t.tracking, INK, 0.80, "l", top + _cap(title_sz))
+                     t.tracking, INK_TECH, 0.96, "l", top + _cap(title_sz))
             base2 = top + _cap(title_sz) * 1.20 + _cap(name_sz) * 1.30
             lead = _show(cr, "SPECIMEN", title_sz, _W_NORMAL, t.tracking,
-                         b.x, base2, INK_DIM, 0.78, "l")
+                         b.x, base2, INK_TECH, 0.80, "l")
             nx = b.x + lead + title_sz * 1.1
             bay_line(cr, Rect(nx, b.y, b.right - nx, b.h), sp.name, name_sz,
                      _W_MEDIUM, t.tracking * 0.7, INK_BRIGHT, 1.0, "l", base2)
@@ -744,11 +691,25 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
                      t.tracking * 1.5, INK_BRIGHT, 0.94, "c")
         else:
             top = b.y + max(0.0, (b.h - stack) * 0.5)
-            bay_line(cr, b, sp.epithet, sub_sz, _W_NORMAL, t.tracking * 1.5,
-                     INK_BRIGHT, 0.94, "c", top + _cap(sub_sz))
-            bay_line(cr, b, "BIOCOMPUTATIONAL OBSERVATION TERMINAL", micro_sz,
-                     _W_NORMAL, t.tracking, INK_TECH, 0.82, "c",
-                     top + _cap(sub_sz) * 1.28 + _cap(micro_sz) * 1.40)
+            ew = bay_line(cr, b, sp.epithet, sub_sz, _W_NORMAL,
+                          t.tracking * 1.5, INK_BRIGHT, 0.94, "c",
+                          top + _cap(sub_sz))
+            # Rule marks either side of the name, as the reference sets it.
+            # Sized FROM the drawn text, so they can never cross it.
+            ry = top + _cap(sub_sz) * 0.5
+            rl = min(sub_sz * 1.6, (b.w - ew) * 0.5 - sub_sz * 0.8)
+            if rl > sub_sz * 0.6:
+                for sgn in (-1.0, 1.0):
+                    x0 = b.cx + sgn * (ew * 0.5 + sub_sz * 0.55)
+                    _hairline(cr, min(x0, x0 + sgn * rl), max(x0, x0 + sgn * rl),
+                              ry, INK_BRIGHT, 0.70)
+            cap_txt = fit_first(("BIOCOMPUTATIONAL OBSERVATION TERMINAL",
+                                 "OBSERVATION TERMINAL"), micro_sz, _W_NORMAL,
+                                t.tracking, b.w)
+            if cap_txt:
+                _show(cr, cap_txt, micro_sz, _W_NORMAL, t.tracking, b.cx,
+                      top + _cap(sub_sz) * 1.28 + _cap(micro_sz) * 1.40,
+                      INK_TECH, 0.82, "c")
 
     # --- bay 3: the LIVE annunciator, in the boss the asset provides ------
     lamp = P.bay("live_lamp") if static else Rect(0, 0, 0, 0)
@@ -770,31 +731,12 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
     # is the one thing here that is NOT cached.
     b = bay_inner(P.bay("clock")) if live else Rect(0, 0, 0, 0)
     if b.valid:
-        # Date and time on ONE optical line, as the reference console has
-        # them: a stacked date reads as a second, competing readout, and at
-        # this bay height it left the clock crowding the recess floor.
-        date = time.strftime("%Y-%m-%d")
+        # The clock alone, as the reference fascia has it: large, centred in
+        # its bay. The date lives in the tooltip-free archive record instead.
         clk = time.strftime("%H:%M:%S")
-        dh = min(b.h * 0.86, 24.0)
-        dsz = max(MIN_TEXT, min(t.micro * 0.94, dh * 0.50))
-        gap = dsz * 1.1
+        dh = min(b.h * 0.86, b.w / max(SEG.measure(clk, 1.0, SEG.CYAN), 1e-6))
         cw = SEG.measure(clk, dh, SEG.CYAN)
-        dw = _text_w(date, dsz, _W_NORMAL, t.tracking)
-        if cw + gap + dw > b.w:
-            # The clock is the readout; the date yields before it shrinks.
-            k = (b.w - gap - dw) / max(cw, 1.0)
-            if k < 0.62:
-                date, dw, gap = "", 0.0, 0.0
-                dh = min(dh, b.w / max(SEG.measure(clk, 1.0, SEG.CYAN), 1e-6))
-            else:
-                dh *= k
-                cw = SEG.measure(clk, dh, SEG.CYAN)
-        base = b.cy + _cap(dsz) * 0.5
-        if date:
-            _show(cr, date, dsz, _W_NORMAL, t.tracking,
-                  b.right - SEG.measure(clk, dh, SEG.CYAN) - gap, base,
-                  INK_TECH, 0.82, "r")
-        SEG.draw_right(cr, clk, b.right, b.cy - dh * 0.5, dh, SEG.CYAN)
+        SEG.draw(cr, clk, b.cx - cw * 0.5, b.cy - dh * 0.5, dh, SEG.CYAN)
         light.glow(b, L_CYAN, 0.055, spread=0.55)
 
     if static:
@@ -821,29 +763,51 @@ def _draw_status_bays(cr, P, L: Layout, m: ConsoleModel) -> None:
         # Type crammed into a 6px recess is not density, it is a fault.
         if not b.valid or b.w < 150.0 or b.h < MIN_TEXT + 1.0:
             continue
-        sz = max(MIN_TEXT, min(t.micro, b.h * 0.86))
+        sz = max(MIN_TEXT, min(t.micro * 1.14, b.h * 0.86))
         base = b.cy + _cap(sz) * 0.5
-        half = b.w / len(pairs)
-        for j, (k, v, col) in enumerate(pairs):
-            cell = Rect(b.x + j * half, b.y, half - sz * 0.6, b.h)
+
+        def need(pr) -> float:
+            k, v, _ = pr
+            return (_text_w(k, sz, _W_NORMAL, t.tracking) + sz * 0.85
+                    + _text_w(v, sz, _W_MEDIUM, t.tracking * 0.5) + sz * 1.2)
+
+        # Whole pairs only: the second pair is dropped before anything is
+        # ellipsised. Pairs sit on even stations when they fit them, and
+        # otherwise pack from the left at their measured widths.
+        shown = list(pairs)
+        while shown and sum(need(pr) for pr in shown) > b.w:
+            shown.pop()
+        if not shown:
+            continue
+        station = b.w / len(shown)
+        x = b.x
+        for j, pr in enumerate(shown):
+            k, v, col = pr
+            x = max(x, b.x + j * station)
+            cell = Rect(x, b.y, b.right - x, b.h)
             bay_pair(cr, cell, k, v, sz, t, value_rgb=col, baseline=base)
+            x += need(pr)
 
 
 def _draw_header_compact(cr, L: Layout, r: Rect, m: ConsoleModel,
-                         light: LightField) -> None:
+                         light: LightField, static: bool = True,
+                         live: bool = True) -> None:
     """Narrow states: one machined strip, two bays, same typography rules.
 
     Below the fascia's usable width its four bays would each be a few pixels
     wide, so the panel is replaced by a shallow recess carrying the two lines
     that still matter. This is a different arrangement, not a scaled one.
     """
-    inner = _rail(cr, r, depth=0.9)
+    target = cr if static else _NULL_CR
+    inner = _rail(target, r, depth=0.9)
     if not inner.valid:
         return
     t = L.type
     sp = m.species
     pad = max(5.0, inner.h * 0.10)
     left = Rect(inner.x + pad, inner.y, inner.w * 0.62 - pad, inner.h)
+    if not static:
+        cr_live, cr = cr, _NULL_CR
     two = inner.h >= 32.0
     name_sz = min(t.specimen, inner.h * (0.46 if two else 0.70))
     if two:
@@ -860,27 +824,28 @@ def _draw_header_compact(cr, L: Layout, r: Rect, m: ConsoleModel,
                  INK_BRIGHT, 1.0, "l")
 
     rx = inner.x + inner.w * 0.64
-    bay = _rail(cr, Rect(rx, inner.y + inner.h * 0.16,
+    if not static:
+        cr = cr_live
+    bay = _rail(cr if static else _NULL_CR, Rect(rx, inner.y + inner.h * 0.16,
                          inner.right - rx - pad, inner.h * 0.68), depth=0.8)
     if not bay.valid or bay.w < 54.0:
         return
     d = min(bay.h * 1.0, 13.0)
-    draw_sprite_fit(cr, C.lamp("small", "nominal"), bay.x + d * 0.6, bay.cy, d)
-    light.add(bay.x + d * 0.6, bay.cy, d * 2.2, L_CHART, 0.16)
     lx = bay.x + d * 1.25
-    lw = bay_line(cr, Rect(lx, bay.y, bay.right - lx, bay.h), "LIVE",
+    if static:
+        draw_sprite_fit(cr, C.lamp("small", "nominal"), bay.x + d * 0.6,
+                        bay.cy, d)
+    else:
+        light.add(bay.x + d * 0.6, bay.cy, d * 2.2, L_CHART, 0.16)
+    lw = bay_line(cr if static else _NULL_CR,
+                  Rect(lx, bay.y, bay.right - lx, bay.h), "LIVE",
                   min(t.label, bay.h * 0.68), _W_MEDIUM, t.tracking, LIME,
                   0.96, "l")
     cx0 = lx + lw + d * 0.5
-    if bay.right - cx0 > 54.0:
+    if live and not static and bay.right - cx0 > 54.0:
         dh = min(bay.h * 0.80, 16.0)
         SEG.draw_right(cr, time.strftime("%H:%M:%S"), bay.right - 2.0,
                        bay.cy - dh * 0.5, dh, SEG.CYAN)
-
-
-def _draw_status_rail(cr, L: Layout, m: ConsoleModel) -> None:
-    """Kept as a no-op hook: the rail is now part of the header fascia."""
-    return
 
 
 # --------------------------------------------------------------------------
@@ -891,7 +856,7 @@ def _draw_stage(cr, L: Layout, m: ConsoleModel, light: LightField) -> None:
     s = L.stage
     if not s.valid:
         return
-    draw_nine(cr, stage_frame(L), s.x, s.y, s.w, s.h)
+    MOD.OBSERVATION.draw(cr, s)
     glass = stage_content(L)
     if glass.valid:
         light.glow(glass, L_CYAN, 0.07, spread=0.40)
@@ -972,7 +937,7 @@ def _corner_brackets(cr, r: Rect, size: float, alpha: float = 0.7) -> None:
         return
     cr.save()
     cr.set_line_width(1.0)
-    cr.set_source_rgba(*rgba(INK_DIM, alpha))
+    cr.set_source_rgba(*rgba(INK, alpha))
     for cx, cy, dx, dy in ((r.x, r.y, 1, 1), (r.right, r.y, -1, 1),
                            (r.x, r.bottom, 1, -1), (r.right, r.bottom, -1, -1)):
         cr.move_to(cx + dx * 0.5, cy + dy * size)
@@ -1000,7 +965,7 @@ def _radius_ruler(cr, sc: Scope, r: Rect, t, alpha: float = 1.0,
     span = min(sc.rad, (r.h * 0.5) - _cap(sz) * 2.2)
     cr.save()
     cr.set_line_width(1.0)
-    cr.set_source_rgba(*rgba(RULE, 0.9 * alpha))
+    cr.set_source_rgba(*rgba(SCOPE, 0.85 * alpha))
     cr.move_to(round(x_tick) + 0.5, sc.cy - span)
     cr.line_to(round(x_tick) + 0.5, sc.cy + span)
     cr.stroke()
@@ -1009,13 +974,13 @@ def _radius_ruler(cr, sc: Scope, r: Rect, t, alpha: float = 1.0,
         yy = sc.cy - span + (2.0 * span) * (i / (len(steps) - 1.0))
         cr.save()
         cr.set_line_width(1.0)
-        cr.set_source_rgba(*rgba(RULE, 0.95 * alpha))
+        cr.set_source_rgba(*rgba(SCOPE, 0.95 * alpha))
         cr.move_to(x_tick - sz * (0.45 if i % 5 else 0.8), round(yy) + 0.5)
         cr.line_to(x_tick, round(yy) + 0.5)
         cr.stroke()
         cr.restore()
         _show(cr, f"{v:.2f}", sz, _W_NORMAL, t.tracking, x_tick - sz * 0.95,
-              yy + _cap(sz) * 0.5, INK_DIM, 0.82 * alpha, "r")
+              yy + _cap(sz) * 0.5, INK, 0.92 * alpha, "r")
     # The caption heads its own scale, and the gutter it reports back is wide
     # enough for the caption as well as the tick labels - so the SPECIMEN
     # FIELD zone begins clear of it rather than on top of it.
@@ -1025,112 +990,9 @@ def _radius_ruler(cr, sc: Scope, r: Rect, t, alpha: float = 1.0,
     # the specimen's disc. R is the standard notation on a radial scale.
     cap = "R (mm)"
     _show(cr, cap, sz, _W_NORMAL, t.tracking, r.x + indent,
-          sc.cy - span - _cap(sz) * 1.6, INK_TECH, 0.84 * alpha, "l")
+          sc.cy - span - _cap(sz) * 1.6, INK_TECH, 0.95 * alpha, "l")
     cap_w = _text_w(cap, sz, _W_NORMAL, t.tracking)
     return max(x_tick - r.x + sz * 1.2, indent + cap_w + sz * 0.8)
-
-
-def _scale_bar(cr, sc: Scope, r: Rect, t, alpha: float = 1.0) -> float:
-    """The SCALE (mm) reference, bottom right. Returns the height it used.
-
-    Graduated from the scope, so the bar is a true magnification reference:
-    its full length is exactly 1.5 mm of field at the current viewport.
-    """
-    if r.w < 300.0 or r.h < 190.0 or sc.rad < 40.0:
-        return 0.0
-    sz = max(MIN_TEXT, min(t.micro * 0.92, r.h * 0.028))
-    bw = min(r.w * 0.30, sc.rad * 0.78, 220.0)
-    bx = r.right - bw
-    by = r.bottom - _cap(sz) * 2.0
-    cr.save()
-    cr.set_line_width(1.0)
-    cr.set_source_rgba(*rgba(INK_DIM, 0.85 * alpha))
-    cr.move_to(bx, round(by) + 0.5)
-    cr.line_to(bx + bw, round(by) + 0.5)
-    for i in range(13):
-        tx = bx + bw * (i / 12.0)
-        hh = sz * (0.78 if i % 4 == 0 else 0.42)
-        cr.move_to(round(tx) + 0.5, by)
-        cr.line_to(round(tx) + 0.5, by - hh)
-    cr.stroke()
-    cr.restore()
-    for i, v in enumerate(("0", "0.5", "1.0", "1.5")):
-        _show(cr, v, sz, _W_NORMAL, t.tracking, bx + bw * (i / 3.0),
-              by - sz * 1.25, INK_DIM, 0.82 * alpha, "c")
-    _show(cr, "SCALE (mm)", sz, _W_NORMAL, t.tracking, bx + bw * 0.5,
-          by + sz * 1.45, INK_DIM, 0.78 * alpha, "c")
-    return _cap(sz) * 4.6
-
-
-def _field_block(cr, x: float, y: float, w: float, rows, t,
-                 heading: str | None = None, alpha: float = 1.0,
-                 align_r: bool = False, measure_only: bool = False,
-                 max_h: float = 1e9) -> float:
-    """One annotation zone inside the observation field. Returns its height.
-
-    `measure_only` lays the block out without drawing, so a bottom-anchored
-    zone can be positioned from its true height instead of a guess.
-    """
-    # Deliberately the densest type on the machine. At ARCHIVE this lands
-    # near 8px, which is where the reference console's field annotations sit
-    # relative to its own width - the readings must be legible without ever
-    # competing with the specimen.
-    sz = max(MIN_TEXT, min(t.micro * 0.86, 9.2))
-    line = _cap(sz) * 1.98
-    yy = y
-    if heading:
-        hz = sz * 1.12
-        if not measure_only:
-            _show(cr, heading, hz, _W_MEDIUM, t.tracking * 1.2,
-                  (x + w) if align_r else x, yy + _cap(hz), INK_BRIGHT,
-                  0.95 * alpha, "r" if align_r else "l", w)
-            hw = _text_w(heading, hz, _W_MEDIUM, t.tracking * 1.2)
-            _hairline(cr, (x + w - hw) if align_r else x,
-                      (x + w) if align_r else (x + hw), yy + _cap(hz) * 1.45,
-                      RULE, 0.9 * alpha)
-        yy += line * 1.18
-    # The key column is shared, so the block reads as an aligned table - but
-    # it may never take more than 60% of the zone. A row whose key or value
-    # does not fit that table goes KEY-OVER-VALUE on its own; a row that does
-    # not fit even then is dropped. Rows arrive in priority order, and any row
-    # that would push the block past `max_h` - into the scope's horizontal
-    # axis - is dropped too. Nothing is ever ellipsised: a truncated reading
-    # ("+0.072, +0.0...") is a wrong number, and a wrong number on an
-    # instrument is worse than a missing one.
-    vtrack = t.tracking * 0.6
-    keys = [_text_w(k + ":", sz, _W_NORMAL, t.tracking) for k, _ in rows]
-    col = min(max(keys) + sz * 0.9, w * 0.60)
-    for (k, v), kw in zip(rows, keys):
-        vw = _text_w(v, sz, _W_MEDIUM, vtrack)
-        inline = kw + sz * 0.6 <= col and vw <= w - col
-        if not inline and (vw > w or kw > w):
-            continue
-        step = line if inline else line * 2.0
-        if (yy - y) + step > max_h:
-            continue
-        base = yy + _cap(sz)
-        if not measure_only:
-            if align_r:
-                if inline:
-                    _show(cr, k + ":", sz, _W_NORMAL, t.tracking,
-                          x + w - col + sz * 0.3, base, INK_TECH,
-                          0.86 * alpha, "r")
-                    _show(cr, v, sz, _W_MEDIUM, vtrack, x + w, base, INK,
-                          0.92 * alpha, "r")
-                else:
-                    _show(cr, k + ":", sz, _W_NORMAL, t.tracking, x + w,
-                          base, INK_TECH, 0.86 * alpha, "r")
-                    _show(cr, v, sz, _W_MEDIUM, vtrack, x + w, base + line,
-                          INK, 0.92 * alpha, "r")
-            else:
-                _show(cr, k + ":", sz, _W_NORMAL, t.tracking, x, base,
-                      INK_TECH, 0.86 * alpha, "l")
-                _show(cr, v, sz, _W_MEDIUM, vtrack,
-                      x + (col if inline else 0.0),
-                      base + (0.0 if inline else line), INK, 0.92 * alpha,
-                      "l")
-        yy += step
-    return yy - y
 
 
 def _field_zones(L: Layout, m: ConsoleModel):
@@ -1175,147 +1037,9 @@ def _draw_field_static(cr, L: Layout, m: ConsoleModel) -> None:
     _corner_brackets(cr, safe, bracket)
     gutter = (_radius_ruler(cr, sc, safe, t, indent=bracket * 0.85)
               if med else 0.0)
-    _polar_grid(cr, sc, glass, t=t)
+    _polar_grid(cr, sc, glass, t=t,
+                x_min=(safe.x + gutter) if gutter > 0.0 else -1e9)
     _cardinals(cr, sc, safe, t, gutter)
-    if big:
-        _scale_bar(cr, sc, safe, t)
-
-
-def _field_gutter(L: Layout, m: ConsoleModel) -> float:
-    """Width the radius ruler reserved, without drawing it."""
-    glass, sc, safe, bracket, med, _ = _field_zones(L, m)
-    if not med or not glass.valid:
-        return 0.0
-    return _radius_ruler(_NULL_CR, sc, safe, L.type, indent=bracket * 0.85)
-
-
-#: Share of the design radius a seated specimen occupies. Must equal
-#: organism.sources.WORLD_FIT / WORLD_RADIUS; kept as a constant because ui/
-#: does not import the organism package.
-_SPECIMEN_SHARE = 372.0 / 460.0
-
-
-def _clear_of_disc(cx: float, cy: float, r: float, y_edge: float,
-                   want_right: float, margin: float) -> float:
-    """Rightmost x a LEFT-hand zone may reach at row `y_edge` without
-    entering the specimen's disc.
-
-    The specimen is round; the annotation zones are rectangles in the corners.
-    A zone is only in the way where its INNER corner falls inside the disc,
-    so the allowable width depends on how far above or below the centre that
-    corner sits - a short block at the very top may run much further toward
-    the axis than a tall one. This is the circle, solved, rather than a
-    conservative column that would waste the whole corner.
-    """
-    dy = abs(cy - y_edge)
-    if dy >= r + margin:
-        return want_right
-    half = math.sqrt(max(0.0, (r + margin) ** 2 - dy * dy))
-    return min(want_right, cx - half)
-
-
-def _draw_field_live(cr, L: Layout, m: ConsoleModel) -> None:
-    """The readings: four annotation zones, every value from live state.
-
-    ZONES
-    -----
-        top left      SPECIMEN FIELD  (mode, magnification, field, optics)
-        top right     MORPHOLOGY      (phase, rotation, symmetry, behaviour)
-        bottom left   VECTOR FIELD    (axis lock, tracking, coordinates)
-
-    Each is width-clamped so it cannot reach the vertical axis, which is what
-    guarantees the specimen stays the dominant object however long a value
-    string becomes. Zones drop out in a fixed order as the field shrinks.
-    """
-    glass, sc, safe, bracket, med, big = _field_zones(L, m)
-    if not glass.valid or not med:
-        return
-    t = L.type
-    sp = m.species
-    gutter = _field_gutter(L, m)
-
-    left_x = safe.x + gutter + glass.w * 0.012
-    max_w = min(glass.w * 0.345, (sc.cx - left_x) - glass.w * 0.045, 320.0)
-    bw = max(90.0, max_w if big else min(glass.w * 0.44,
-                                         sc.cx - left_x - 8.0))
-    # The specimen's own disc. Every zone below is clamped so that its inner
-    # corner stays outside it: the creature is the object under observation,
-    # and a reading printed across it is an obstruction, not a measurement.
-    body_r = sc.rad * _SPECIMEN_SHARE
-    gap = max(6.0, glass.w * 0.012)
-    # Height budgets: a top zone ends before the X axis and its cardinal
-    # label, a bottom zone starts after them.
-    axis_clear = _cap(max(MIN_TEXT, min(t.micro, 10.0))) * 2.6
-    top_h = max(0.0, (sc.cy - axis_clear) - safe.y)
-    bot_h = max(0.0, safe.bottom - (sc.cy + axis_clear))
-
-    def fit(y_edge: float, width: float) -> float:
-        right = _clear_of_disc(sc.cx, sc.cy, body_r, y_edge,
-                               left_x + width, gap)
-        return max(0.0, right - left_x)
-
-    # A narrower field drops rows rather than ellipsising them: an observation
-    # annotation that cannot be read in full is worse than one not shown,
-    # because the reader cannot tell which it is.
-    rows = [("MODE", "LIVE OBSERVATION"),
-            ("MAGNIFICATION", f"{m.magnification:.1f}x"),
-            ("FIELD WIDTH", f"{m.field_mm:.2f} mm"),
-            ("FOCUS", "AUTO"),
-            ("APERTURE", m.aperture)]
-    if not big:
-        rows = [("MODE", "LIVE"),
-                ("MAG", f"{m.magnification:.1f}x"),
-                ("FIELD", f"{m.field_mm:.2f} mm")]
-    rows = tuple(rows)
-
-    # Top-left: size the block, then clamp it to the disc at its own lower
-    # edge. Clamping can make a value wrap, which makes the block taller,
-    # which moves the edge - so settle it in two passes.
-    w_tl = bw
-    for _ in range(2):
-        h = _field_block(cr, left_x, safe.y, w_tl, rows, t,
-                         heading="SPECIMEN FIELD", measure_only=True,
-                         max_h=top_h)
-        w_tl = min(bw, fit(safe.y + h, bw))
-    if w_tl >= 72.0:
-        _field_block(cr, left_x, safe.y, w_tl, rows, t,
-                     heading="SPECIMEN FIELD", max_h=top_h)
-    if not big:
-        return
-
-    # Top-right mirrors the same rule on the other side of the axis.
-    right_edge = safe.right - glass.w * 0.012
-    rrows = (("PHASE", f"{m.phase:.3f} \u03c0"),
-             ("ROTATION", f"{m.rotation:.2f} RPM"),
-             ("SYMMETRY", sp.symmetry_short),
-             ("BEHAVIOR", m.behavior))
-    right_w = min(max_w, right_edge - (sc.cx + glass.w * 0.045))
-    for _ in range(2):
-        h = _field_block(cr, 0.0, safe.y, right_w, rrows, t,
-                         heading=sp.morphology, align_r=True,
-                         measure_only=True, max_h=top_h)
-        dy = abs(sc.cy - (safe.y + h))
-        if dy < body_r + gap:
-            inner = sc.cx + math.sqrt(max(0.0, (body_r + gap) ** 2 - dy * dy))
-            right_w = min(right_w, right_edge - inner)
-    if right_w >= 72.0:
-        _field_block(cr, right_edge - right_w, safe.y, right_w, rrows, t,
-                     heading=sp.morphology, align_r=True, max_h=top_h)
-
-    # Bottom-left: the clamp is taken at the block's UPPER edge.
-    cx, cy, cz = m.coords
-    vrows = (("AXIS LOCK", "STABLE"),
-             ("TRACKING", "CENTROID"),
-             ("COORDINATES", f"{cx:+.3f}, {cy:+.3f} mm"))
-    w_bl = bw
-    for _ in range(2):
-        h = _field_block(cr, left_x, 0.0, w_bl, vrows, t,
-                         heading="VECTOR FIELD", measure_only=True,
-                         max_h=bot_h)
-        w_bl = min(bw, fit(safe.bottom - h, bw))
-    if w_bl >= 72.0:
-        _field_block(cr, left_x, safe.bottom - h, w_bl, vrows, t,
-                     heading="VECTOR FIELD", max_h=bot_h)
 
 
 # --------------------------------------------------------------------------
@@ -1332,48 +1056,31 @@ class _Channel:
     lamps: tuple[str, str, str, str]   # annunciator micro-labels
     span: str = "60 s"                 # time span indicator
     bars: bool = False                 # graph shows a bargraph, not a trace
+    short: tuple[str, ...] = ()        # shorter forms of `sub`, longest first
+
+    @property
+    def subs(self) -> tuple[str, ...]:
+        return (self.sub,) + self.short
 
 
 _CHANNELS = (
     _Channel("cpu", "PROCESSOR", "BIOCOMPUTATIONAL CORE", "%",
              "CPU LOAD", ("100", "50", "0"),
-             ("CLK", "ALG", "NET", "I/O")),
+             ("CLK", "ALG", "NET", "I/O"),
+             short=("BIOCOMP. CORE", "BIOCOMPUT.", "CORE")),
     _Channel("thermal", "THERMAL", "ENVIRONMENT & METABOLIC", "\u00b0C",
              "CORE TEMP", ("120", "80", "40"),
-             ("SEN", "REG", "FAN", "SYS")),
-    _Channel("memory", "MEMORY", "FIELD DATA & STATE", "G",
+             ("SEN", "REG", "FAN", "SYS"),
+             short=("ENVIRONMENT", "ENVIRON.", "ENV.")),
+    _Channel("memory", "MEMORY", "FIELD DATA & STATE", "Gb",
              "RESIDENT SET", ("13.5", "6.8", "0"),
-             ("MEM", "BUF", "CACHE", "I/O"), bars=True),
+             ("MEM", "BUF", "CACHE", "I/O"), bars=True,
+             short=("FIELD DATA", "DATA")),
     _Channel("frame", "FRAME / RENDER", "VISUALISATION PIPELINE", "FPS",
              "FRAME TIME", ("33", "16", "0"),
-             ("REN", "IMG", "DSP", "SYNC")),
+             ("REN", "IMG", "DSP", "SYNC"),
+             short=("PIPELINE", "PIPE.")),
 )
-
-
-def _status_rows(ch: str, tel: Telemetry, fps: float, frame_ms: float,
-                 m: "ConsoleModel"):
-    """The four-row TARGET / PEAK / RANGE / delta / STATE column.
-
-    Every value is live; the reference shows the same shape of information for
-    each subsystem, which is a large part of why its modules read as dense.
-    """
-    tr = m.trace(ch).values
-    peak = max(tr) if tr else 0.0
-    if ch == "cpu":
-        d = (tr[-1] - tr[-13]) * 100.0 if len(tr) > 13 else 0.0
-        return (("TARGET", "100%"), ("PEAK", f"{peak * 100:.0f}%"),
-                ("\u0394", f"{d:+.0f}%"))
-    if ch == "thermal":
-        d = (tr[-1] - tr[-13]) * 120.0 if len(tr) > 13 else 0.0
-        return (("TARGET", "100\u00b0C"), ("RANGE", "0-120"),
-                ("\u0394", f"{d:+.1f}\u00b0C"))
-    if ch == "memory":
-        d = (tr[-1] - tr[-13]) * max(tel.mem_total_gb, 1.0) if len(tr) > 13 else 0.0
-        return (("TARGET", f"{tel.mem_total_gb:.1f}G"),
-                ("PEAK", f"{peak * max(tel.mem_total_gb, 1.0):.1f}G"),
-                ("\u0394", f"{d:+.1f}G"))
-    d = (tr[-1] - tr[-13]) * 120.0 if len(tr) > 13 else 0.0
-    return (("TARGET", "60+"), ("RANGE", "0-33"), ("\u0394", f"{d:+.1f}"))
 
 
 def _channel_values(ch: str, tel: Telemetry, fps: float, frame_ms: float):
@@ -1406,140 +1113,6 @@ def _channel_values(ch: str, tel: Telemetry, fps: float, frame_ms: float):
             SEG.AMBER if low else SEG.PALE,
             "REDUCED" if low else "SMOOTH",
             "warning" if low else "nominal")
-
-
-def _graticule(cr, r: Rect, rows: int = 4, cols: int = 6,
-               alpha: float = 1.0) -> None:
-    """A subtle measuring grid behind a trace. Without it a sparkline is
-    decoration; with it the same line is a reading."""
-    if r.w < 24.0 or r.h < 16.0:
-        return
-    cr.save()
-    cr.rectangle(r.x, r.y, r.w, r.h)
-    cr.clip()
-    cr.set_line_width(1.0)
-    cr.set_source_rgba(*rgba(RULE, 0.55 * alpha))
-    for i in range(1, rows):
-        yy = round(r.y + r.h * i / rows) + 0.5
-        cr.move_to(r.x, yy)
-        cr.line_to(r.right, yy)
-    cr.stroke()
-    cr.set_source_rgba(*rgba(RULE, 0.38 * alpha))
-    cr.set_dash([1.5, 3.5])
-    for i in range(1, cols):
-        xx = round(r.x + r.w * i / cols) + 0.5
-        cr.move_to(xx, r.y)
-        cr.line_to(xx, r.bottom)
-    cr.stroke()
-    cr.restore()
-
-
-def _trace(cr, r: Rect, vals: list[float], rgb, alpha: float = 0.95,
-           fill: bool = True) -> None:
-    """The live trace: a filled skirt under a crisp line, plus a head marker.
-
-    The skirt is what makes a 60-second history legible at a glance - the eye
-    reads area faster than it reads a hairline - and the head marker says which
-    end is now.
-    """
-    if r.w < 8.0 or r.h < 6.0 or len(vals) < 2:
-        return
-    n = len(vals)
-    dx = r.w / (n - 1)
-    top = r.y + r.h * 0.06
-    span = r.h * 0.88
-
-    def _pt(i: int, v: float) -> tuple[float, float]:
-        return (r.x + i * dx, top + (1.0 - max(0.0, min(1.0, v))) * span)
-
-    cr.save()
-    cr.rectangle(r.x, r.y, r.w, r.h)
-    cr.clip()
-    if fill:
-        cr.new_path()
-        cr.move_to(r.x, r.bottom)
-        for i, v in enumerate(vals):
-            cr.line_to(*_pt(i, v))
-        cr.line_to(r.right, r.bottom)
-        cr.close_path()
-        g = cairo.LinearGradient(r.x, top, r.x, r.bottom)
-        g.add_color_stop_rgba(0.0, rgb[0], rgb[1], rgb[2], 0.30 * alpha)
-        g.add_color_stop_rgba(1.0, rgb[0], rgb[1], rgb[2], 0.02 * alpha)
-        cr.set_source(g)
-        cr.fill()
-    cr.set_line_join(1)
-    cr.set_line_cap(1)
-    cr.set_line_width(max(1.0, r.h * 0.045))
-    cr.set_source_rgba(*rgba(rgb, alpha))
-    cr.new_path()
-    for i, v in enumerate(vals):
-        px, py = _pt(i, v)
-        cr.line_to(px, py) if i else cr.move_to(px, py)
-    cr.stroke()
-    hx, hy = _pt(n - 1, vals[-1])
-    cr.set_source_rgba(*rgba(rgb, min(1.0, alpha * 1.1)))
-    cr.new_path()
-    cr.arc(hx - 1.0, hy, max(1.2, r.h * 0.035), 0.0, TAU)
-    cr.fill()
-    cr.restore()
-
-
-def _graph_zones(bay: Rect, ch: _Channel, t) -> tuple[Rect, Rect, float, float]:
-    """(well interior, plot area, label size, caption ledge height).
-
-    Pure. Both the static pass (axis, graticule, caption) and the live pass
-    (the trace) derive their geometry from this one call, so a cached frame
-    and the trace drawn on top of it cannot disagree about where the plot is.
-    """
-    r = bay_inner(bay, sx=0.55, sy=0.85)
-    if not r.valid or r.w < 40.0 or r.h < 22.0:
-        return (r, r, 0.0, 0.0)
-    sz = max(MIN_TEXT, min(t.micro * 0.84, r.h * 0.185))
-    ledge = _cap(sz) * 1.9 if r.h > 44.0 else 0.0
-    gutter = 0.0
-    if r.w > 96.0 and not ch.bars:
-        gutter = max(_text_w(x, sz, _W_NORMAL, t.tracking)
-                     for x in ch.axis) + sz * 0.7
-    return (r, Rect(r.x + gutter, r.y, r.w - gutter, r.h - ledge), sz, ledge)
-
-
-def _draw_graph_frame(cr, bay: Rect, ch: _Channel, t,
-                      alpha: float = 1.0) -> None:
-    """The measured part of a graph well: axis values, graticule, captions.
-
-    None of it changes between frames, which is why it lives in the cached
-    static layer. A sparkline without this is decoration; with it the same
-    line is a reading.
-    """
-    r, plot, sz, ledge = _graph_zones(bay, ch, t)
-    if sz <= 0.0:
-        return
-    if plot.x > r.x:
-        for i, lab in enumerate(ch.axis):
-            yy = plot.y + (plot.h - _cap(sz)) * (i / (len(ch.axis) - 1.0)) \
-                + _cap(sz)
-            _show(cr, lab, sz, _W_NORMAL, t.tracking, plot.x - sz * 0.7, yy,
-                  INK_TECH, 0.82 * alpha, "r")
-    _graticule(cr, plot, alpha=alpha)
-    if ledge > 0.0:
-        base = r.bottom - ledge * 0.14
-        _show(cr, ch.caption, sz, _W_NORMAL, t.tracking, r.x, base,
-              INK_TECH, 0.84 * alpha, "l", r.w * 0.62)
-        _show(cr, ch.span, sz, _W_NORMAL, t.tracking, r.right, base,
-              INK_TECH, 0.66 * alpha, "r", r.w * 0.34)
-
-
-def _draw_graph_live(cr, bay: Rect, ch: _Channel, t, vals: list[float],
-                     level: float, rgb, alpha: float = 1.0) -> Rect:
-    """The live trace, drawn into the plot area the frame reserved."""
-    r, plot, sz, _ = _graph_zones(bay, ch, t)
-    if not plot.valid:
-        return plot
-    if ch.bars:
-        _bargraph(cr, plot.inset(0.0, plot.h * 0.10), level, rgb, segments=30)
-    else:
-        _trace(cr, plot, vals, rgb, 0.95 * alpha)
-    return plot
 
 
 def _draw_numeric(cr, bay: Rect, ch: _Channel, t, text: str, level: float,
@@ -1587,251 +1160,6 @@ def _draw_numeric(cr, bay: Rect, ch: _Channel, t, text: str, level: float,
         _bargraph(cr, Rect(bx, by, bw, bh), level, style.lit, segments=28)
 
 
-def _draw_status_column(cr, bay: Rect, ch: _Channel, t, rows, style,
-                        alpha: float = 1.0) -> None:
-    """The compact diagnostic block: measured rows, then the state word.
-
-    The state is given its own full-width block rather than a fourth
-    key/value row. It is the one value here that is a WORD, it is the widest
-    thing in the column, and it is what the eye goes to - crushing it into a
-    right-aligned half-column is how it ended up ellipsised.
-    """
-    r = bay_inner(bay, sx=1.0, sy=0.45)
-    if not r.valid or r.w < 30.0:
-        return
-    pairs = list(rows[:-1])
-    state_k, state_v = rows[-1]
-    # Below this the measured rows cannot show both a key and a value without
-    # ellipsising one of them, so the recess carries the state word alone.
-    if r.w < 74.0:
-        vsz = max(MIN_TEXT, min(t.micro * 1.05, r.h * 0.20))
-        ksz = max(MIN_TEXT, min(t.micro * 0.84, r.h * 0.16))
-        _show(cr, state_k, ksz, _W_NORMAL, t.tracking, r.cx,
-              r.cy - _cap(vsz) * 0.55, INK_DIM, 0.80 * alpha, "c", r.w)
-        bay_line(cr, r, state_v, vsz, _W_MEDIUM, t.tracking * 0.4, style.lit,
-                 0.98 * alpha, "c", r.cy + _cap(vsz) * 0.95)
-        return
-    n = len(pairs)
-    state_h = min(r.h * 0.34, max(14.0, r.h * 0.28))
-    top = Rect(r.x, r.y, r.w, r.h - state_h)
-    line = top.h / max(1, n)
-    sz = max(MIN_TEXT, min(t.micro * 0.86, line * 0.60))
-    for j, (k, v) in enumerate(pairs):
-        base = top.y + line * j + (line + _cap(sz)) * 0.5
-        kw = _show(cr, k, sz, _W_NORMAL, t.tracking, top.x, base, INK_TECH,
-                   0.86 * alpha, "l", top.w * 0.60)
-        vx = top.x + kw + sz * 0.55
-        if top.right - vx > sz:
-            bay_line(cr, Rect(vx, top.y, top.right - vx, line), v, sz,
-                     _W_MEDIUM, t.tracking * 0.4, INK, 0.92 * alpha, "r",
-                     base, x=top.right)
-
-    sb = Rect(r.x, r.bottom - state_h, r.w, state_h)
-    ksz = max(MIN_TEXT, min(t.micro * 0.80, sb.h * 0.42))
-    vsz = max(MIN_TEXT, min(t.micro * 0.98, sb.h * 0.52))
-    _hairline(cr, sb.x, sb.right, sb.y + 0.5, RULE, 0.55 * alpha)
-    _show(cr, state_k, ksz, _W_NORMAL, t.tracking, sb.x,
-          sb.y + _cap(ksz) * 1.55, INK_TECH, 0.84 * alpha, "l", sb.w)
-    bay_line(cr, Rect(sb.x, sb.y, sb.w, sb.h), state_v, vsz, _W_MEDIUM,
-             t.tracking * 0.4, style.lit, 0.98 * alpha, "r",
-             sb.bottom - _cap(vsz) * 0.30, x=sb.right)
-
-
-#: Cached static module panels. Bounded, and keyed by every input the static
-#: pass reads, so a hit can only ever be pixel-identical to a miss.
-_MODULE_STATIC: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
-_MODULE_STATIC_LIMIT = 12
-
-
-def _module_static(w: int, h: int, ch: _Channel, idx: int,
-                   L: Layout) -> cairo.ImageSurface | None:
-    """The unchanging half of a telemetry module, rendered once.
-
-    WHAT IS STATIC, AND WHY IT IS WORTH CACHING
-    -------------------------------------------
-    A module's shell, its identity plaque, its title and subsystem caption,
-    its graph graticule, axis values, caption and time-span are byte-identical
-    from frame to frame - they change only on resize. They are also the
-    expensive half: a 9-sliced panel blit plus a dozen shaped text runs.
-
-    Rendering them into one surface per module size and blitting that leaves
-    the per-frame work as exactly the things that actually move: the lamps,
-    the trace, the numerals, the meter and the status values.
-
-    SAFETY
-    ------
-    The key carries the drawn size, the channel and the layout state - the
-    complete set of inputs the static pass reads. Nothing live can reach this
-    surface, because the live pass is a different function. Dropping the whole
-    cache between any two frames would change performance and nothing else.
-    """
-    key = (w, h, ch.key, idx, L.state.value, round(L.type.label, 2),
-           round(L.type.micro, 2), round(L.type.tracking, 2))
-    hit = _MODULE_STATIC.get(key)
-    if hit is not None:
-        _MODULE_STATIC.move_to_end(key)
-        return hit
-    if w < 1 or h < 1:
-        return None
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
-    c2 = cairo.Context(surf)
-    local = Rect(0.0, 0.0, float(w), float(h))
-    t = L.type
-    P = F.MODULE.draw(c2, local)
-
-    pl = P.bay("plaque")
-    if pl.valid and pl.h > 9.0:
-        _engrave(c2, f"0{idx + 1}", pl, min(t.label * 1.1, pl.h * 0.62),
-                 t.tracking * 0.4, INK_BRIGHT, "c")
-
-    tb = bay_inner(P.bay("title"), sy=0.4)
-    if tb.valid:
-        tsz = min(t.label * 1.20, tb.h * 0.82)
-        base = tb.cy + _cap(tsz) * 0.5
-        tw = bay_line(c2, tb, ch.title, tsz, _W_MEDIUM, t.tracking,
-                      INK_BRIGHT, 0.97, "l", base)
-        sx = tb.x + tw + tsz * 1.1
-        if tb.right - sx > tsz * 3.0:
-            ssz = max(MIN_TEXT, min(t.micro * 0.86, tb.h * 0.62))
-            bay_line(c2, Rect(sx, tb.y, tb.right - sx, tb.h), ch.sub, ssz,
-                     _W_NORMAL, t.tracking, INK_TECH, 0.80, "r", base,
-                     x=tb.right)
-
-    _draw_graph_frame(c2, P.bay("graph"), ch, t)
-    surf.flush()
-    _MODULE_STATIC[key] = surf
-    while len(_MODULE_STATIC) > _MODULE_STATIC_LIMIT:
-        _MODULE_STATIC.popitem(last=False)
-    return surf
-
-
-def _draw_module(cr, r: Rect, ch: _Channel, idx: int, L: Layout,
-                 tel: Telemetry, fps: float, frame_ms: float,
-                 m: ConsoleModel, light: LightField) -> None:
-    """One subsystem bay, drawn into the generated module shell.
-
-    The shell is a manufactured panel: identity plaque, title bay, four
-    annunciator wells, and three display recesses proportioned as GRAPH |
-    NUMERIC | STATUS. Every piece of content below is placed into one of those
-    recesses by name. Nothing is positioned by guesswork against the outer
-    rectangle, which is what previously left the graphs reading as thumbnails
-    floating on a plate.
-    """
-    if r.w < 60.0 or r.h < 28.0:
-        return
-    t = L.type
-    text, level, style, state, lamp_state = _channel_values(
-        ch.key, tel, fps, frame_ms)
-    m.trace(ch.key).push(level)
-    vals = m.trace(ch.key).values
-
-    if sprite_size(F.MODULE.name)[0] == 0 or r.w < 210.0 or r.h < 76.0:
-        _draw_module_plain(cr, r, ch, idx, L, text, level, style, state,
-                           lamp_state, vals, tel, m, light)
-        return
-
-    # The shell, the plaque, the titles and the graph's measured frame do not
-    # change between frames: blit them, then draw only what moves.
-    iw, ih = int(round(r.w)), int(round(r.h))
-    static = _module_static(iw, ih, ch, idx, L)
-    if static is not None:
-        cr.save()
-        cr.set_source_surface(static, round(r.x), round(r.y))
-        cr.paint()
-        cr.restore()
-        P = F.MODULE.place(Rect(round(r.x), round(r.y), float(iw), float(ih)))
-    else:
-        P = F.MODULE.draw(cr, r)
-
-    # --- annunciator wells, with engraved legends beneath ------------------
-    l0 = P.bay("lamp_0")
-    if l0.valid and l0.h > 5.0:
-        d = min(l0.h, l0.w) * 1.06
-        band = P.bay("legend")
-        lab_sz = max(5.6, min(t.micro * 0.80, band.h * 0.94))
-        show_legend = (band.valid and band.h >= 7.0
-                       and band.w > lab_sz * 11.0)
-        for k in range(4):
-            lb = P.bay(f"lamp_{k}")
-            st = lamp_state if k == 3 else ("nominal" if k else "standby")
-            draw_sprite_fit(cr, C.lamp("small", st), lb.cx, lb.cy, d)
-            if st == "warning":
-                light.add(lb.cx, lb.cy, d * 2.6, L_AMBER, 0.15)
-            elif st == "critical":
-                light.add(lb.cx, lb.cy, d * 2.8, L_AMBER, 0.18)
-            elif st == "nominal":
-                light.add(lb.cx, lb.cy, d * 2.0, L_CHART, 0.10)
-            if show_legend:
-                _engrave(cr, ch.lamps[k],
-                         Rect(lb.cx - band.w * 0.16, band.y,
-                              band.w * 0.32, band.h),
-                         lab_sz, t.tracking * 0.35, INK_DIM, "c", 0.92)
-
-    plot = _draw_graph_live(cr, P.bay("graph"), ch, t, vals, level, style.lit)
-    light.glow(plot if plot.valid else P.bay("graph"), style.lit, 0.05,
-               spread=0.45)
-    _draw_numeric(cr, P.bay("numeric"), ch, t, text, level, style, light)
-
-    rows = list(_status_rows(ch.key, tel, fps, frame_ms, m))
-    rows.append(("STATE", state))
-    _draw_status_column(cr, P.bay("status"), ch, t, rows, style)
-
-
-def _draw_module_plain(cr, r: Rect, ch: _Channel, idx: int, L: Layout,
-                       text: str, level: float, style, state: str,
-                       lamp_state: str, vals, tel, m: ConsoleModel,
-                       light: LightField) -> None:
-    """A module too small for the shell: the same instruments, assembled.
-
-    Here the discrete generated housings earn their keep - a graph well, a
-    segment housing and a meter trough seated in a machined recess. It is a
-    different arrangement of the same hardware, not a shrunken module.
-    """
-    t = L.type
-    inner = _rail(cr, r, depth=0.9)
-    if not inner.valid or inner.h < 20.0:
-        return
-    pad = max(3.0, inner.w * 0.012)
-    head_h = min(inner.h * 0.30, _cap(t.label) * 2.3)
-    tsz = min(t.label * 1.05, max(MIN_TEXT, head_h * 0.68))
-    bay_line(cr, Rect(inner.x + pad, inner.y, inner.w - pad * 2, head_h),
-             ch.title, tsz, _W_MEDIUM, t.tracking, INK_BRIGHT, 0.96, "l")
-    lamp_h = min(head_h * 0.52, 9.0)
-    if inner.w > 170.0 and lamp_h > 3.0:
-        draw_sprite_fit(cr, C.lamp("small", lamp_state),
-                        inner.right - lamp_h * 0.9, inner.y + head_h * 0.5,
-                        lamp_h)
-
-    body = Rect(inner.x, inner.y + head_h, inner.w,
-                max(0.0, inner.h - head_h))
-    if body.h < 14.0:
-        return
-    gap = max(2.0, body.w * 0.016)
-    mt_h = min(body.h * 0.22, max(7.0, body.w / 9.0)) if body.h > 34.0 else 0.0
-    row = Rect(body.x, body.y, body.w, body.h - mt_h)
-    well_w = body.w * (0.44 if body.w > 200.0 else 0.40)
-
-    well = Rect(row.x, row.y, well_w, row.h)
-    draw_nine(cr, C.GRAPH_WELL, well.x, well.y, well.w, well.h)
-    gx, gy, gw, gh = C.GRAPH_WELL.content(well.x, well.y, well.w, well.h)
-    _draw_graph_frame(cr, Rect(gx, gy, gw, gh), ch, t)
-    _draw_graph_live(cr, Rect(gx, gy, gw, gh), ch, t, vals, level, style.lit)
-
-    hx = row.x + well_w + gap
-    hr = Rect(hx, row.y, row.right - hx, row.h)
-    if hr.w > 34.0:
-        draw_nine(cr, C.SEGMENT_HOUSING, hr.x, hr.y, hr.w, hr.h)
-        sx, sy, sw, sh = C.SEGMENT_HOUSING.content(hr.x, hr.y, hr.w, hr.h)
-        _draw_numeric(cr, Rect(sx, sy, sw, sh), ch, t, text, level, style,
-                      light, meter=False)
-
-    if mt_h > 6.0:
-        mt = Rect(body.x, body.bottom - mt_h, body.w, mt_h * 0.94)
-        draw_nine(cr, C.METER_TROUGH, mt.x, mt.y, mt.w, mt.h)
-        bx, by, bw, bh = C.METER_TROUGH.content(mt.x, mt.y, mt.w, mt.h)
-        _bargraph(cr, Rect(bx, by, bw, bh), level, style.lit, segments=32)
-
-
 def _draw_condensed(cr, r: Rect, L: Layout, tel: Telemetry, fps: float,
                     frame_ms: float, m: ConsoleModel,
                     light: LightField) -> None:
@@ -1851,7 +1179,6 @@ def _draw_condensed(cr, r: Rect, L: Layout, tel: Telemetry, fps: float,
     for i, ch in enumerate(_CHANNELS):
         text, level, style, state, lamp_state = _channel_values(
             ch.key, tel, fps, frame_ms)
-        m.trace(ch.key).push(level)
         cx0 = ix + i * cw
         cell = Rect(cx0, iy, cw, ih)
 
@@ -1883,325 +1210,406 @@ def _draw_condensed(cr, r: Rect, L: Layout, tel: Telemetry, fps: float,
             cr.fill()
 
 
-def _draw_modules(cr, L: Layout, tel: Telemetry, fps: float, frame_ms: float,
-                  m: ConsoleModel, light: LightField) -> None:
+# --------------------------------------------------------------------------
+# MODULE 04: the telemetry rack
+# --------------------------------------------------------------------------
+# The rack is ONE generated body with four manufactured rows. Each row has an
+# ID plate, a title bay, four lamp sockets, a graph well, a numeric well, a
+# meter trough and a state well - and every piece of data below is drawn into
+# one of those recesses by name.
+#
+# CADENCE
+#   static  (cached per size)   rack metal, plate IDs, titles, graph grids,
+#                               scale values and captions
+#   5 Hz    (cached per sample) each graph's 60-second trace
+#   frame                       numerics, meters, state words, lamps
+@dataclass(frozen=True, slots=True)
+class _Scale:
+    lo: float
+    hi: float
+    ticks: tuple[str, str, str]      # top, middle, bottom
+    caption: str
+    ref: float | None = None         # a reference line (60 FPS budget)
+
+
+def _graph_scale(ch: str, tel: Telemetry) -> _Scale:
+    """Fixed, meaningful scales. The graph shows history; it never autoscales."""
+    if ch == "cpu":
+        return _Scale(0.0, 100.0, ("100", "50", "0"), "CPU LOAD  %")
+    if ch == "thermal":
+        return _Scale(20.0, 100.0, ("100", "60", "20"), "CORE TEMP  °C")
+    if ch == "memory":
+        tot = max(1.0, tel.mem_total_gb)
+        return _Scale(0.0, tot, (f"{tot:.0f}", f"{tot * 0.5:.0f}", "0"),
+                      "RESIDENT  GB")
+    return _Scale(0.0, 50.0, ("50", "25", "0"), "FRAME TIME  ms", ref=1000.0 / 60.0)
+
+
+def _rack_zones(well: Rect, t) -> tuple[Rect, Rect, float]:
+    """(plot, caption band, type size) inside one graph well. Pure."""
+    g = well.inset(max(2.0, well.w * 0.035), max(2.0, well.h * 0.05))
+    sz = max(MIN_TEXT, min(t.micro * 0.84, g.h * 0.16))
+    cap_h = _cap(sz) * 2.0 if g.h > 40.0 else 0.0
+    plot = Rect(g.x, g.y, g.w, g.h - cap_h)
+    return plot, Rect(g.x, plot.bottom, g.w, cap_h), sz
+
+
+def _rack_graph_static(cr, well: Rect, sc: _Scale, t) -> None:
+    """Grid, scale values, 60 s divisions and caption: a real instrument."""
+    plot, cap, sz = _rack_zones(well, t)
+    if plot.w < 20.0 or plot.h < 12.0:
+        return
+    cr.save()
+    cr.set_line_width(1.0)
+    # four horizontal divisions
+    cr.set_source_rgba(0.30, 0.52, 0.62, 0.30)
+    for i in range(5):
+        yy = round(plot.y + plot.h * i / 4.0) + 0.5
+        cr.move_to(plot.x, yy)
+        cr.line_to(plot.right, yy)
+    cr.stroke()
+    # six 10-second time divisions, dashed and quieter
+    cr.set_source_rgba(0.30, 0.52, 0.62, 0.20)
+    cr.set_dash([1.5, 3.0])
+    for i in range(1, 6):
+        xx = round(plot.x + plot.w * i / 6.0) + 0.5
+        cr.move_to(xx, plot.y)
+        cr.line_to(xx, plot.bottom)
+    cr.stroke()
+    cr.set_dash([])
+    if sc.ref is not None and sc.lo < sc.ref < sc.hi:
+        yy = round(plot.bottom - plot.h * (sc.ref - sc.lo) / (sc.hi - sc.lo)) + 0.5
+        cr.set_source_rgba(0.72, 0.88, 0.29, 0.30)
+        cr.set_dash([4.0, 2.5])
+        cr.move_to(plot.x, yy)
+        cr.line_to(plot.right, yy)
+        cr.stroke()
+        cr.set_dash([])
+    cr.restore()
+    # scale values, inside the plot at its left (oldest) edge
+    vs = max(MIN_TEXT, sz * 0.92)
+    if plot.h > vs * 3.2 and plot.w > 60.0:
+        tx = plot.x + 2.0
+        _show(cr, sc.ticks[0], vs, _W_NORMAL, t.tracking * 0.4, tx,
+              plot.y + _cap(vs) + 2.0, INK_TECH, 0.62, "l")
+        if plot.h > vs * 6.0:
+            _show(cr, sc.ticks[1], vs, _W_NORMAL, t.tracking * 0.4, tx,
+                  plot.cy + _cap(vs) * 0.5, INK_TECH, 0.48, "l")
+        _show(cr, sc.ticks[2], vs, _W_NORMAL, t.tracking * 0.4, tx,
+              plot.bottom - 2.0, INK_TECH, 0.62, "l")
+    if cap.h > 0.0:
+        base = cap.cy + _cap(sz) * 0.5
+        span_w = _show(cr, "60 s", sz, _W_NORMAL, t.tracking * 0.5, cap.right,
+                       base, INK_TECH, 0.62, "r")
+        bay_line(cr, Rect(cap.x, cap.y, cap.w - span_w - sz, cap.h),
+                 sc.caption, sz, _W_NORMAL, t.tracking * 0.6, INK_TECH, 0.86,
+                 "l", base)
+
+
+_TRACE_CACHE: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
+_TRACE_LIMIT = 16
+
+
+def _rack_trace(cr, well: Rect, ring, sc: _Scale, rgb, t) -> None:
+    """The 60-second history, re-rendered only when a sample arrives."""
+    plot, _, _ = _rack_zones(well, t)
+    if plot.w < 20.0 or plot.h < 12.0 or ring is None:
+        return
+    pw, ph = int(round(plot.w)), int(round(plot.h))
+    key = (id(ring), pw, ph, ring.version, sc.lo, sc.hi, rgb, hidpi.scale())
+    surf = _TRACE_CACHE.get(key)
+    if surf is None:
+        surf = hidpi.surface(pw, ph)
+        c2 = cairo.Context(surf)
+        cols = max(2, min(pw, ring.cap))
+        v = ring.window(cols)
+        span = max(1e-6, sc.hi - sc.lo)
+        n = len(v)
+        pts = []
+        run: list[tuple[float, float]] = []
+        for i in range(n):
+            val = v[i]
+            if val != val:          # NaN: no data yet for this column
+                if run:
+                    pts.append(run)
+                    run = []
+                continue
+            f = (float(val) - sc.lo) / span
+            f = 0.0 if f < 0.0 else (1.0 if f > 1.0 else f)
+            run.append((pw * i / (n - 1), 1.5 + (ph - 3.0) * (1.0 - f)))
+        if run:
+            pts.append(run)
+        for seg in pts:
+            if len(seg) < 2:
+                continue
+            c2.move_to(seg[0][0], ph)
+            for x, y in seg:
+                c2.line_to(x, y)
+            c2.line_to(seg[-1][0], ph)
+            c2.close_path()
+            g = cairo.LinearGradient(0, 0, 0, ph)
+            g.add_color_stop_rgba(0.0, rgb[0], rgb[1], rgb[2], 0.26)
+            g.add_color_stop_rgba(1.0, rgb[0], rgb[1], rgb[2], 0.03)
+            c2.set_source(g)
+            c2.fill()
+            c2.set_line_join(cairo.LINE_JOIN_ROUND)
+            c2.set_line_width(max(1.0, min(1.8, ph * 0.03)))
+            c2.set_source_rgba(rgb[0], rgb[1], rgb[2], 0.95)
+            c2.move_to(*seg[0])
+            for x, y in seg[1:]:
+                c2.line_to(x, y)
+            c2.stroke()
+        if pts and pts[-1]:
+            hx, hy = pts[-1][-1]
+            c2.set_source_rgba(rgb[0], rgb[1], rgb[2], 1.0)
+            c2.arc(min(hx, pw - 2.0), hy, max(1.3, ph * 0.035), 0.0, TAU)
+            c2.fill()
+        surf.flush()
+        _TRACE_CACHE[key] = surf
+        while len(_TRACE_CACHE) > _TRACE_LIMIT:
+            _TRACE_CACHE.popitem(last=False)
+    else:
+        _TRACE_CACHE.move_to_end(key)
+    cr.save()
+    cr.set_source_surface(surf, round(plot.x), round(plot.y))
+    cr.paint()
+    cr.restore()
+
+
+#: Deliberate short forms of the state words, for narrow state wells.
+_STATE_SHORT = {"NOMINAL": ("NOM.",), "ELEVATED": ("ELEV.",),
+                "REDUCED": ("RED.",), "SMOOTH": ("OK",), "HIGH": ("HI",),
+                "AT LIMIT": ("LIMIT", "LIM."), "NO SENSOR": ("N/A",)}
+
+
+def _rack_state(cr, well: Rect, word: str, rgb, t) -> None:
+    """STATE caption over the state word, both centred in the narrow well."""
+    r = well.inset(max(1.5, well.w * 0.06), max(2.0, well.h * 0.10))
+    if not r.valid or r.w < 16.0:
+        return
+    ksz = max(MIN_TEXT, min(t.micro * 0.84, r.h * 0.16))
+    vsz = max(MIN_TEXT, min(t.label * 1.10, r.h * 0.26, r.w * 0.22))
+    gap = _cap(ksz) * 1.1
+    stack = _cap(ksz) + gap + _cap(vsz)
+    top = r.cy - stack * 0.5
+    # The full word, shrunk by at most a quarter; then the short form.
+    full = word
+    word = ""
+    for sz in (vsz, vsz * 0.9, vsz * 0.8, vsz * 0.75):
+        sz = max(MIN_TEXT, sz)
+        if _text_w(full, sz, _W_MEDIUM, t.tracking * 0.3) <= r.w:
+            word, vsz = full, sz
+            break
+    if not word:
+        word = fit_first(_STATE_SHORT.get(full, ()), vsz, _W_MEDIUM,
+                         t.tracking * 0.3, r.w)
+    if not word:
+        return
+    if _text_w("STATE", ksz, _W_NORMAL, t.tracking * 0.8) <= r.w:
+        _show(cr, "STATE", ksz, _W_NORMAL, t.tracking * 0.8, r.cx,
+              top + _cap(ksz), INK_TECH, 0.72, "c")
+    _show(cr, word, vsz, _W_MEDIUM, t.tracking * 0.3, r.cx, top + stack, rgb,
+          0.98, "c")
+
+
+def _rack_placed(L: Layout):
+    return MOD.RACK.place(L.readout)
+
+
+def _draw_rack_static(cr, L: Layout, tel: Telemetry) -> None:
+    """Rack metal plus everything in it that only changes on resize."""
     r = L.readout
     if not r.valid:
         return
-    n = len(_CHANNELS)
-    # A module shell needs real estate in BOTH axes to be worth drawing. Test
-    # the cell a module would actually get, not just the axis it stacks along:
-    # a tall narrow column and a short wide row fail for different reasons.
-    if L.readout_vertical:
-        cell_w, cell_h = r.w, r.h / n
-    else:
-        cell_w, cell_h = r.w / n, r.h
-    if cell_w < 150.0 or cell_h < 54.0:
-        _draw_condensed(cr, r, L, tel, fps, frame_ms, m, light)
+    t = L.type
+    P = MOD.RACK.draw(cr, r)
+    for i, ch in enumerate(_CHANNELS):
+        pl = P.bay(f"r{i}_plate")
+        if pl.h > 7.0:
+            sz = max(MIN_TEXT, min(t.label * 1.05, pl.h * 0.62))
+            # engraved into the bright plate: dark cut, light lower lip
+            base = pl.cy + _cap(sz) * 0.5
+            _show(cr, f"0{i + 1}", sz, _W_MEDIUM, t.tracking * 0.6, pl.cx,
+                  base + 1.0, (0.86, 0.88, 0.88), 0.50, "c")
+            _show(cr, f"0{i + 1}", sz, _W_MEDIUM, t.tracking * 0.6, pl.cx,
+                  base, (0.03, 0.04, 0.05), 1.0, "c")
+        tb = P.bay(f"r{i}_title")
+        tb = tb.inset(max(3.0, tb.h * 0.30), 0.0)
+        if tb.valid:
+            tsz = max(MIN_TEXT, min(t.label * 1.15, tb.h * 0.70))
+            base = tb.cy + _cap(tsz) * 0.5
+            tw = bay_line(cr, tb, ch.title, tsz, _W_MEDIUM, t.tracking,
+                          INK_BRIGHT, 0.97, "l", base)
+            sx = tb.x + tw + tsz * 1.2
+            ssz = max(MIN_TEXT, min(t.micro * 0.90, tb.h * 0.50))
+            sub = fit_first(ch.subs, ssz, _W_NORMAL, t.tracking,
+                            tb.right - sx)
+            if sub:
+                _show(cr, sub, ssz, _W_NORMAL, t.tracking, tb.right, base,
+                      INK_TECH, 0.80, "r")
+        _rack_graph_static(cr, P.bay(f"r{i}_graph"),
+                           _graph_scale(ch.key, tel), t)
+
+
+def _draw_rack_live(cr, L: Layout, tel: Telemetry, fps: float,
+                    frame_ms: float, m: ConsoleModel, light: LightField) -> None:
+    r = L.readout
+    if not r.valid:
         return
-    gap = max(3.0, (r.h if L.readout_vertical else r.w) * 0.012)
-    if L.readout_vertical:
-        cell_h = (r.h - gap * (n - 1)) / n
-        for i, ch in enumerate(_CHANNELS):
-            _draw_module(cr, Rect(r.x, r.y + i * (cell_h + gap), r.w, cell_h),
-                         ch, i, L, tel, fps, frame_ms, m, light)
-    else:
-        cell_w = (r.w - gap * (n - 1)) / n
-        for i, ch in enumerate(_CHANNELS):
-            _draw_module(cr, Rect(r.x + i * (cell_w + gap), r.y, cell_w, r.h),
-                         ch, i, L, tel, fps, frame_ms, m, light)
+    t = L.type
+    P = _rack_placed(L)
+    hist = m.history
+    for i, ch in enumerate(_CHANNELS):
+        text, level, style, state, lamp_state = _channel_values(
+            ch.key, tel, fps, frame_ms)
+        # lamps
+        d = P.bay(f"r{i}_lamp0").h * 1.05
+        for k in range(4):
+            lb = P.bay(f"r{i}_lamp{k}")
+            st = lamp_state if k == 3 else ("nominal" if k else "standby")
+            draw_sprite_fit(cr, C.lamp("small", st), lb.cx, lb.cy, d)
+            # Only a lamp that is SAYING something throws light: a warning
+            # spill is information, sixteen green halos are noise (and were a
+            # third of a rack rebuild).
+            if st in ("warning", "critical"):
+                light.add(lb.cx, lb.cy, d * 2.4, L_AMBER, 0.14)
+        # graph: the 60 s history
+        well = P.bay(f"r{i}_graph")
+        _rack_trace(cr, well, hist[ch.key] if hist else None,
+                    _graph_scale(ch.key, tel), style.lit, t)
+        # numeric: the value NOW, and its level in the meter trough
+        _draw_numeric(cr, P.bay(f"r{i}_numeric"), ch, t, text, level, style,
+                      light, meter=False)
+        mt = P.bay(f"r{i}_meter")
+        mi = mt.inset(max(2.0, mt.h * 0.22), max(1.5, mt.h * 0.28))
+        _bargraph(cr, mi, level, style.lit, segments=26)
+        _rack_state(cr, P.bay(f"r{i}_state"), state, style.lit, t)
 
 
 # --------------------------------------------------------------------------
 # controls
 # --------------------------------------------------------------------------
-def _key_seat(cr, r: Rect, depth: float = 1.0, lit: bool = False,
-              focus: bool = False) -> None:
-    """The recess a specimen key sits in: a soft socket, not a drawn button.
-
-    Its entire job is to make the authored plate read as INSTALLED. It is
-    therefore darker than the trough, slightly larger than the key on every
-    side, and carries a bright lower lip - the one cue that says the metal
-    continues underneath. It never draws an outline the key would have to
-    align with, because a raster key with a rounded profile can never sit
-    exactly inside a drawn rectangle.
-    """
-    if r.w < 6.0 or r.h < 6.0:
-        return
-    pad = max(1.0, r.h * 0.030)
-    s = Rect(r.x - pad, r.y - pad, r.w + pad * 2.0, r.h + pad * 2.0)
-    cr.save()
-    g = cairo.LinearGradient(s.x, s.y, s.x, s.bottom)
-    g.add_color_stop_rgba(0.0, 0.026, 0.029, 0.032, 0.78 * depth)
-    g.add_color_stop_rgba(0.72, 0.050, 0.055, 0.060, 0.60 * depth)
-    g.add_color_stop_rgba(1.0, 0.092, 0.098, 0.104, 0.52 * depth)
-    cr.set_source(g)
-    cr.rectangle(s.x, s.y, s.w, s.h)
-    cr.fill()
-    cr.set_line_width(1.0)
-    cr.set_source_rgba(0.60, 0.64, 0.66, (0.30 if focus else 0.16) * depth)
-    cr.move_to(s.x, s.bottom - 0.5)
-    cr.line_to(s.right, s.bottom - 0.5)
-    cr.stroke()
-    if lit:
-        # The authored active plate carries its own illumination; this is only
-        # the catch it throws on the socket immediately around it.
-        cr.set_source_rgba(0.42, 0.95, 0.46, 0.055)
-        cr.rectangle(s.x, s.y, s.w, s.h)
-        cr.fill()
-    cr.restore()
-
-
 def _draw_controls(cr, L: Layout, m: ConsoleModel, light: LightField,
                    static: bool = True, live: bool = True) -> None:
-    """The specimen selector: five engraved creature keys, mechanically seated.
+    """MODULE 05: the selector mounting plate, and the approved keys in it.
 
-    ASSEMBLY ORDER, and why
-    -----------------------
-      1. the trough        one dark machined recess spanning the bezel width
-      2. the backing rail  a thin gunmetal strip the keys are bolted through
-      3. divider ribs      hairline grooves between key stations
-      4. the sockets       a shadowed seat per key
-      5. the key plates    the authored artwork, uniform scale, never tinted
-      6. the identifiers   engraved channel + archive code on the ledge
-      7. the light         a faint green catch from whichever key is live
+    STATIC   the generated plate (five trued transparent wells, two control
+             openings, label ledges) and the engraved channel identifiers.
+    LIVE     the approved key plates, rocker and mode key, and their light.
 
-    Everything before step 5 is deliberately quieter than step 5. The keys are
-    the hero of this console; the mounting exists only to stop them reading as
-    five PNGs on a black field.
+    The plate's wells are genuinely open: whatever sits beneath a key is the
+    shell's recessed bed, never a black rectangle painted to hide a gap.
     """
     geo, mode = control_geometry(L)
     if not geo.valid:
         return
-    t = L.type
-    trough = L.controls
-
-    if not static:
-        rail = trough.inset(max(2.0, trough.h * 0.055) * 0.9,
-                            max(2.0, trough.h * 0.055) * 0.75)
-        _draw_controls_live(cr, L, m, light, geo, mode)
-        return
-
-    # --- 1 + 2. the trough, cut INTO the console's lower board -------------
-    # This is a channel milled into the same board the observation bezel is
-    # mounted on, not a dark panel laid underneath it. The order below is the
-    # order a machinist would see it in: the board face, then the cut, then
-    # the shadow the cut throws, then the floor at the bottom of it.
-    rail = trough
-    if trough.valid:
-        wall = max(2.5, trough.h * 0.062)
-        rail = trough.inset(wall * 1.25, wall * 0.95)
-        cr.save()
-        # (a) the lower board: the SAME metal as the chassis around it, so the
-        #     trough is a feature of a surface rather than an object on one.
-        # The board is a structural member let INTO the enclosure, so it
-        # terminates against the chassis side walls rather than lying across
-        # them. Without the clamp it sat on top of the frame and the handle
-        # rail, which reads as a panel dropped on the machine.
-        lo, hi = trough.x - wall * 2.2, trough.right + wall * 2.2
-        if L.show_chassis and L.chassis.valid:
-            cw = max(10.0, min(L.chassis.w, L.chassis.h) * 0.020)
-            lo = max(lo, L.chassis.x + cw)
-            hi = min(hi, L.chassis.right - cw)
-        board = Rect(lo, trough.y - wall * 1.4, max(0.0, hi - lo),
-                     trough.h + wall * 2.4)
-        gb = cairo.LinearGradient(board.x, board.y, board.x, board.bottom)
-        gb.add_color_stop_rgba(0.0, 0.300, 0.308, 0.310, 1.0)
-        gb.add_color_stop_rgba(0.35, 0.248, 0.256, 0.260, 1.0)
-        gb.add_color_stop_rgba(1.0, 0.196, 0.203, 0.208, 1.0)
-        cr.set_source(gb)
-        cr.rectangle(board.x, board.y, board.w, board.h)
-        cr.fill()
-        # (b) the transition lip: the seam the bezel above seats against
-        cr.set_line_width(1.0)
-        cr.set_source_rgba(0.74, 0.78, 0.80, 0.34)
-        cr.move_to(board.x, board.y + 0.5)
-        cr.line_to(board.right, board.y + 0.5)
-        cr.stroke()
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.42)
-        cr.move_to(board.x, board.bottom - 0.5)
-        cr.line_to(board.right, board.bottom - 0.5)
-        cr.stroke()
-        # (c) the cut, and the shadow its upper wall throws into the channel
-        gc = cairo.LinearGradient(trough.x, trough.y, trough.x, trough.bottom)
-        gc.add_color_stop_rgba(0.0, 0.030, 0.033, 0.036, 1.0)
-        gc.add_color_stop_rgba(0.30, 0.062, 0.066, 0.070, 1.0)
-        gc.add_color_stop_rgba(1.0, 0.108, 0.114, 0.120, 1.0)
-        cr.set_source(gc)
-        cr.rectangle(trough.x, trough.y, trough.w, trough.h)
-        cr.fill()
-        # (d) the floor
-        g2 = cairo.LinearGradient(rail.x, rail.y, rail.x, rail.bottom)
-        g2.add_color_stop_rgba(0.0, 0.150, 0.157, 0.162, 1.0)
-        g2.add_color_stop_rgba(0.55, 0.116, 0.123, 0.129, 1.0)
-        g2.add_color_stop_rgba(1.0, 0.084, 0.090, 0.096, 1.0)
-        cr.set_source(g2)
-        cr.rectangle(rail.x, rail.y, rail.w, rail.h)
-        cr.fill()
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.55)
-        cr.move_to(rail.x, rail.y + 0.5)
-        cr.line_to(rail.right, rail.y + 0.5)
-        cr.stroke()
-        cr.set_source_rgba(0.70, 0.74, 0.76, 0.24)
-        cr.move_to(rail.x, rail.bottom - 0.5)
-        cr.line_to(rail.right, rail.bottom - 0.5)
-        cr.stroke()
-        cr.restore()
-        # (e) end terminations: the channel is bolted down where it stops
-        scr = min(trough.h * 0.16, 13.0)
-        if scr > 5.0 and trough.w > 280.0:
-            for sx in (board.x + scr * 1.05, board.right - scr * 1.05):
-                draw_sprite_fit(cr, "part/screw_small", sx, board.cy, scr)
-
-    # --- 3. divider ribs between key stations ------------------------------
-    for i in range(geo.n - 1):
-        x = geo.key_rect(i).right + (geo.pitch - geo.key_w) * 0.5
-        _divider(cr, x, rail.y + rail.h * 0.12, rail.bottom - rail.h * 0.12,
-                 0.60)
-
-    # --- 6. engraved channel identifiers -----------------------------------
-    if geo.ledge >= 7.0:
-        sz = max(MIN_TEXT, min(t.micro * 0.84, geo.ledge * 0.78))
-        for i, sp in enumerate(CATALOGUE):
-            lr = geo.label_rect(i)
-            dim = i in m.disabled
-            live = i == m.active
-            txt = f"{i + 1:02d}  {sp.archive}"
-            if _text_w(txt, sz, _W_NORMAL, t.tracking * 0.35) > lr.w:
-                # Simplify the LABEL before shrinking the key: the engraved
-                # organism is the identity, the code is the footnote.
-                txt = sp.archive
+    if static:
+        MOD.SELECTOR.draw(cr, L.controls)
+        t = L.type
+        if geo.ledge >= 5.0:
+            sz = max(MIN_TEXT, min(t.micro * 0.84, geo.ledge * 0.66))
+            for i, sp in enumerate(CATALOGUE):
+                lr = geo.label_rect(i)
+                txt = f"{i + 1:02d}  {sp.archive}"
                 if _text_w(txt, sz, _W_NORMAL, t.tracking * 0.35) > lr.w:
-                    txt = f"{i + 1:02d}"
-            _engrave(cr, txt, lr, sz, t.tracking * 0.35,
-                     INK_BRIGHT if live else INK_DIM,
-                     "c", 0.35 if dim else (0.95 if live else 0.78))
-
+                    txt = sp.archive
+                    if _text_w(txt, sz, _W_NORMAL, t.tracking * 0.35) > lr.w:
+                        txt = f"{i + 1:02d}"
+                live_i = i == m.active
+                # baseline on the trough floor, clear of the key above
+                _show(cr, txt, sz, _W_NORMAL, t.tracking * 0.35, lr.cx,
+                      lr.bottom - lr.h * 0.16,
+                      INK_BRIGHT if live_i else INK_TECH, 1.0 if live_i else 0.86,
+                      "c", lr.w)
     if live:
         _draw_controls_live(cr, L, m, light, geo, mode)
 
 
 def _draw_controls_live(cr, L: Layout, m: ConsoleModel, light: LightField,
                         geo, mode: Rect) -> None:
-    """Sockets, the authored key plates, the aux controls and their light.
+    """The approved key plates, the aux controls and their light.
 
-    Split out because these are the only parts of the selector that change:
-    which key is latched, which is under the pointer, which is being pressed.
-    The trough, rail, ribs and engraved identifiers around them do not.
+    NO BACKING RECTANGLE. An earlier build filled each key's socket and
+    washed the lit one green, which read as a green square matte around the
+    active key. The authored active plate carries its own illumination; the
+    only addition here is a small bloom from its lamp strip, confined to the
+    key's own silhouette by the light pass radius.
     """
-    for i in range(geo.n):
-        st = SEL.key_state(i, m.active, m.pressed, m.focus, m.disabled)
-        _key_seat(cr, geo.key_rect(i), lit=(SEL.plate(st) == "active"),
-                  focus=(m.focus == i))
     SEL.draw_keys(cr, geo, m.active, m.pressed, m.focus, m.disabled)
-
-    # The one lit key catches the metal around it.
     if 0 <= m.active < geo.n and m.active not in m.disabled:
         lx, ly, lrad = geo.lamp_point(m.active)
-        light.add(lx, ly, max(10.0, lrad * 2.6), L_CHART, 0.13)
-        kr = geo.key_rect(m.active)
-        light.add(kr.cx, kr.bottom + kr.h * 0.10, kr.w * 0.85, L_CHART, 0.07)
+        light.add(lx, ly, max(6.0, lrad * 1.2), L_CHART, 0.10)
 
     cyc = cycle_rect(geo, mode)
     if cyc.valid and cyc.w > 10.0:
-        _key_seat(cr, cyc.inset(-cyc.w * 0.02, -cyc.h * 0.06), depth=0.45)
-        draw_sprite(cr, C.cycle_key(m.cycle_state), cyc.x, cyc.y,
-                    cyc.w, cyc.h)
+        draw_sprite(cr, C.cycle_key(m.cycle_state), cyc.x, cyc.y, cyc.w, cyc.h)
     if mode.valid and mode.w > 8.0:
-        _key_seat(cr, mode.inset(-mode.w * 0.03, -mode.h * 0.03), depth=0.45)
         draw_sprite(cr, C.mode_key(m.mode_state), mode.x, mode.y,
                     mode.w, mode.h)
         if m.mode_state == "active":
-            light.add(mode.cx, mode.cy, mode.h * 0.7, L_CHART, 0.12)
+            light.add(mode.cx, mode.cy, mode.h * 0.5, L_CHART, 0.10)
         elif m.mode_state == "error":
-            light.add(mode.cx, mode.cy, mode.h * 0.7, L_AMBER, 0.12)
+            light.add(mode.cx, mode.cy, mode.h * 0.5, L_AMBER, 0.10)
         elif m.mode_state == "armed":
-            light.add(mode.cx, mode.cy, mode.h * 0.6, L_CYAN, 0.08)
+            light.add(mode.cx, mode.cy, mode.h * 0.45, L_CYAN, 0.06)
 
 
 # --------------------------------------------------------------------------
 # footer
 # --------------------------------------------------------------------------
-def _reticle(cr, cx: float, cy: float, rad: float, alpha: float = 1.0) -> None:
-    """The machined crosshair badge at the left end of the archive rail."""
-    if rad < 5.0:
-        return
-    cr.save()
-    g = cairo.RadialGradient(cx - rad * 0.3, cy - rad * 0.4, rad * 0.1,
-                             cx, cy, rad)
-    g.add_color_stop_rgba(0.0, 0.42, 0.45, 0.45, 1.0)
-    g.add_color_stop_rgba(1.0, 0.20, 0.22, 0.23, 1.0)
-    cr.set_source(g)
-    cr.arc(cx, cy, rad, 0.0, TAU)
-    cr.fill()
-    cr.set_line_width(1.2)
-    cr.set_source_rgba(0.08, 0.09, 0.10, 0.9)
-    cr.arc(cx, cy, rad, 0.0, TAU)
-    cr.stroke()
-    cr.set_line_width(max(1.0, rad * 0.10))
-    cr.set_source_rgba(0.10, 0.11, 0.12, 0.85)
-    cr.move_to(cx - rad * 0.82, cy)
-    cr.line_to(cx + rad * 0.82, cy)
-    cr.move_to(cx, cy - rad * 0.82)
-    cr.line_to(cx, cy + rad * 0.82)
-    cr.stroke()
-    cr.set_source_rgba(0.60, 0.64, 0.66, 0.35)
-    cr.arc(cx, cy, rad * 0.46, 0.0, TAU)
-    cr.stroke()
-    cr.restore()
 
 
 def _draw_footer(cr, L: Layout, m: ConsoleModel) -> None:
-    """The archive rail, drawn into the generated footer fascia.
+    """MODULE 06: the bottom status rail, with the archive record in its bays.
 
-    The asset is a manufactured panel: a machined badge boss with the
-    instrument reticle already cast into it, eight key/value bays, and a
-    three-line block at the right end for the standing motto. Every bay below
-    is addressed by name. Nothing is centred by guesswork, and the reticle is
-    not redrawn in code - it is part of the metal.
+    Seven information bays carry the specimen's archive record; the terminal
+    bay carries the system state. The badge boss at the left is cast metal
+    (part of the generated rail), so nothing is drawn there.
     """
     r = L.footer
     if not L.show_footer or not r.valid:
         return
     t = L.type
     sp = m.species
-
-    if sprite_size(F.FOOTER.name)[0] == 0 or r.w < 420.0 or r.h < 22.0:
+    if not MOD.FOOTER.available or r.w < 420.0 or r.h < 18.0:
         _draw_footer_plain(cr, L, r, m)
         return
-
-    P = F.FOOTER.draw(cr, r)
-    bays = (("INSTRUMENT", "AOM-1", INK_BRIGHT),
-            ("ARCHIVE", sp.archive, INK_BRIGHT),
-            ("CLASS", sp.cls, INK_BRIGHT),
-            ("ORIGIN", sp.origin, INK_BRIGHT),
-            ("SYMMETRY", sp.symmetry, INK_BRIGHT),
-            ("MODE", "LIVE OBSERVATION", INK_BRIGHT),
-            ("FIELD", m.behavior, INK_BRIGHT),
-            ("SYSTEM BUS", "ONLINE", LIME))
+    P = MOD.FOOTER.draw(cr, r)
+    # One line per bay, one type size for the whole rail, as the reference
+    # rail reads. Values are the SHORT forms so none is ever ellipsised; the
+    # full archive record is in the header and the field.
+    vals = (("AOM-1",), (sp.archive,), (sp.cls.split()[0], "MATH."),
+            (sp.origin, "SYNTH."), (sp.symmetry_short, sp.symmetry_short[:5]),
+            ("LIVE",), (m.behavior, m.behavior[:4]))
     b0 = P.bay("bay_0")
-    ksz = max(MIN_TEXT, min(t.micro * 0.90, b0.h * 0.34))
-    vsz = max(MIN_TEXT, min(t.micro * 1.10, b0.h * 0.44))
-    for i, (k, v, col) in enumerate(bays):
-        bi = bay_inner(P.bay(f"bay_{i}"), sx=0.7, sy=1.35)
-        if bi.valid:
-            bay_stack(cr, bi, k, v, ksz, vsz, t, value_rgb=col)
-
-    mb = bay_inner(P.bay("motto"), sx=0.8, sy=0.5)
-    if mb.valid and mb.h > 14.0:
-        mz = max(MIN_TEXT, min(t.micro * 0.84, mb.h * 0.29))
-        step = mb.h / 3.0
-        for i, word in enumerate(("OBSERVE", "UNDERSTAND", "EXTEND")):
-            bay_line(cr, mb, word, mz, _W_NORMAL, t.tracking * 1.2, INK_DIM,
-                     0.80, "l", mb.y + step * i + (step + _cap(mz)) * 0.5)
-
-    # engraved division mark on the chassis metal below the rail
-    if L.show_chassis and L.chassis.valid and r.w > 820.0:
-        ez = max(MIN_TEXT, min(t.micro * 0.80, r.h * 0.26))
-        ey = min(L.chassis.bottom - ez * 0.6, r.bottom + ez * 2.0)
-        _show(cr, "OCEANOGRAPHIC RESEARCH DIVISION", ez, _W_NORMAL,
-              t.tracking * 1.4, L.chassis.right - L.chassis.w * 0.030,
-              ey, (0.20, 0.22, 0.23), 0.95, "r")
+    inner = [P.bay(f"bay_{i}").inset(max(3.0, b0.h * 0.24), 0.0)
+             for i in range(len(vals))]
+    vsz = max(MIN_TEXT, min(t.micro * 1.02, b0.h * 0.38))
+    ksz = max(MIN_TEXT, min(t.micro * 0.80, b0.h * 0.26))
+    # one size for the rail: shrink (never below the floor) until every
+    # value's FULL form fits, then fall back to short forms bay by bay
+    while vsz > MIN_TEXT and any(
+            _text_w(v[0], vsz, _W_MEDIUM, t.tracking * 0.5) > bi.w
+            for v, bi in zip(vals, inner)):
+        vsz = max(MIN_TEXT, vsz - 0.25)
+    for v, bi in zip(vals, inner):
+        txt = fit_first(v, vsz, _W_MEDIUM, t.tracking * 0.5, bi.w)
+        if bi.valid and txt:
+            _show(cr, txt, vsz, _W_MEDIUM, t.tracking * 0.5, bi.x,
+                  bi.cy + _cap(vsz) * 0.5, INK_BRIGHT, 0.92, "l")
+    tb = P.bay("terminal").inset(max(4.0, b0.h * 0.30), max(1.5, b0.h * 0.10))
+    if tb.valid:
+        base = tb.cy + _cap(vsz) * 0.5
+        w0 = _show(cr, "SYSTEM BUS", ksz, _W_NORMAL, t.tracking, tb.x,
+                   base, INK_TECH, 0.80, "l")
+        w1 = _show(cr, "ONLINE", vsz, _W_MEDIUM, t.tracking * 0.6,
+                   tb.x + w0 + vsz * 0.7, base, LIME, 0.96, "l")
+        mx = tb.x + w0 + w1 + vsz * 2.0
+        motto = "OBSERVE · UNDERSTAND · EXTEND"
+        # The motto is shown whole or not at all: an ellipsised motto is noise.
+        if _text_w(motto, ksz, _W_NORMAL, t.tracking) <= tb.right - mx:
+            _show(cr, motto, ksz, _W_NORMAL, t.tracking, tb.right, base,
+                  INK_DIM, 0.85, "r")
 
 
 def _draw_footer_plain(cr, L: Layout, r: Rect, m: ConsoleModel) -> None:
@@ -2260,28 +1668,41 @@ def _draw_footer_plain(cr, L: Layout, r: Rect, m: ConsoleModel) -> None:
 # frames would change performance and nothing else.
 _UNDER_CACHE: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
 _OVER_CACHE: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
-_LAYER_LIMIT = 3
+_REGION_CACHE: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
+_LAYER_LIMIT = 2
+_REGION_LIMIT = 8
 
 
-def _layer_key(L: Layout, m: ConsoleModel) -> tuple:
-    """Every discrete input the static passes read. Nothing live belongs here."""
+def _layer_key(L: Layout, m: ConsoleModel, mem_total: float = 0.0) -> tuple:
+    """Every discrete input the static passes read. Nothing live belongs here.
+
+    `mem_total` is part of the key because the memory graph's fixed scale is
+    the installed memory; it is constant for the life of the process.
+    """
     return (int(round(L.width)), int(round(L.height)), L.state.value,
             m.species.key, m.active, m.behavior,
-            L.show_chassis, L.show_footer, L.show_controls, L.show_status)
+            L.show_chassis, L.show_footer, L.show_controls, L.show_status,
+            round(mem_total, 1), hidpi.scale())
 
 
-def _cached_layer(cache, key, w: int, h: int, paint) -> cairo.ImageSurface | None:
+def six_module(L: Layout) -> bool:
+    """True when the full six-module machine is drawn (INSTRUMENT/ARCHIVE)."""
+    return L.state is not LayoutState.COMPACT and L.readout_vertical
+
+
+def _cached_layer(cache, key, w: int, h: int, paint,
+                  limit: int = _LAYER_LIMIT) -> cairo.ImageSurface | None:
     hit = cache.get(key)
     if hit is not None:
         cache.move_to_end(key)
         return hit
     if w < 1 or h < 1:
         return None
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+    surf = hidpi.surface(w, h)
     paint(cairo.Context(surf))
     surf.flush()
     cache[key] = surf
-    while len(cache) > _LAYER_LIMIT:
+    while len(cache) > limit:
         cache.popitem(last=False)
     return surf
 
@@ -2295,59 +1716,181 @@ def _blit(cr, surf) -> None:
 
 def clear_static_cache() -> None:
     """Drop derived surfaces. Purely a memory operation; changes no output."""
-    _MODULE_STATIC.clear()
     _UNDER_CACHE.clear()
     _OVER_CACHE.clear()
+    _REGION_CACHE.clear()
+    _TRACE_CACHE.clear()
 
 
-def draw_under(cr, L: Layout, m: ConsoleModel, vp_scale: float = 1.0) -> None:
-    """Everything BEHIND the organism: enclosure, glass, measuring furniture.
+# --------------------------------------------------------------------------
+# composition: static layers + live regions
+# --------------------------------------------------------------------------
+# The frame is composed from, bottom to top:
+#
+#   LAYER 0-1  under   background, 01 shell, glass, graticule     (static)
+#   LAYER 2    organism, clipped to the glass                     (per frame)
+#   LAYER 3    over    03 bezel, 02 header, 04 rack, 05 selector
+#                      plate, 06 rail + all static type           (static)
+#   LAYER 4-6  regions header clock, rack readouts, selector keys,
+#                      each with its own light spill              (on change)
+#
+# A REGION is a small rectangle that is re-rendered only when its own inputs
+# change - the clock once a second, the rack when a telemetry sample lands,
+# the keys on input. It starts from the static composite of that rectangle,
+# so placing it over the static layers is seamless, and it never overlaps the
+# glass. Per frame, the only thing rasterised is the organism.
+@dataclass(frozen=True, slots=True)
+class Region:
+    name: str
+    rect: Rect              # logical, snapped to whole device pixels
+    surface: cairo.ImageSurface
+    key: tuple
 
-    The static half is cached; the live half is the field's readings, which
-    change every frame because the specimen does.
-    """
+
+def _snap(r: Rect, pad: float = 0.0) -> Rect:
+    """Grow `r` to whole DEVICE pixels, so a region's copy of the static
+    layers lands pixel-for-pixel on them and cannot leave a seam."""
+    ds = hidpi.scale()
+    x0 = math.floor((r.x - pad) * ds)
+    y0 = math.floor((r.y - pad) * ds)
+    x1 = math.ceil((r.right + pad) * ds)
+    y1 = math.ceil((r.bottom + pad) * ds)
+    return Rect(x0 / ds, y0 / ds, (x1 - x0) / ds, (y1 - y0) / ds)
+
+
+def layer_under(L: Layout, m: ConsoleModel) -> cairo.ImageSurface | None:
     w, h = int(round(L.width)), int(round(L.height))
-    key = _layer_key(L, m)
 
     def paint(c2):
         draw_background(c2, L.width, L.height)
         _draw_chassis(c2, L)
         _draw_field_static(c2, L, m)
+    return _cached_layer(_UNDER_CACHE, _layer_key(L, m), w, h, paint)
 
-    surf = _cached_layer(_UNDER_CACHE, key, w, h, paint)
-    if surf is None:
-        paint(cr)
+
+def layer_over(L: Layout, m: ConsoleModel,
+               tel: Telemetry) -> cairo.ImageSurface | None:
+    w, h = int(round(L.width)), int(round(L.height))
+    six = six_module(L)
+
+    def paint(c2):
+        light = LightField()
+        _draw_stage(c2, L, m, light)
+        _draw_header(c2, L, m, light, static=True, live=False)
+        if six:
+            _draw_rack_static(c2, L, tel)
+        _draw_controls(c2, L, m, light, static=True, live=False)
+        _draw_footer(c2, L, m)
+        # constant emitters (the glass, the LIVE lamp) belong to the metal
+        light.paint(c2)
+    return _cached_layer(_OVER_CACHE, _layer_key(L, m, tel.mem_total_gb),
+                         w, h, paint)
+
+
+def _region(name: str, rect: Rect, key: tuple, under, over, paint_live,
+            pad: float = 6.0) -> Region | None:
+    r = _snap(rect, pad)
+    if r.w < 2.0 or r.h < 2.0:
+        return None
+    full = (name, r.x, r.y, r.w, r.h, hidpi.scale(), id(under), id(over)) + key
+    hit = _REGION_CACHE.get(full)
+    if hit is None:
+        hit = hidpi.surface(r.w, r.h)
+        c = cairo.Context(hit)
+        c.translate(-r.x, -r.y)
+        for layer in (under, over):
+            if layer is not None:
+                c.set_source_surface(layer, 0, 0)
+                c.paint()
+        light = LightField()
+        paint_live(c, light)
+        light.paint(c, clip=r)
+        hit.flush()
+        _REGION_CACHE[full] = hit
+        while len(_REGION_CACHE) > _REGION_LIMIT:
+            _REGION_CACHE.popitem(last=False)
     else:
+        _REGION_CACHE.move_to_end(full)
+    return Region(name, r, hit, full)
+
+
+def regions(L: Layout, m: ConsoleModel, tel: Telemetry, fps: float,
+            frame_ms: float, under=None, over=None) -> list[Region]:
+    """The live regions for this frame. Each is cached on its OWN inputs."""
+    if under is None:
+        under = layer_under(L, m)
+    if over is None:
+        over = layer_over(L, m, tel)
+    out: list[Region] = []
+    six = six_module(L)
+    hist_v = tuple(m.history[k].version for k in History.CHANNELS) \
+        if m.history is not None else ()
+    fps_i = int(round(fps))
+    tel_key = (round(tel.cpu_pct, 1), tel.temp_c, round(tel.mem_used_gb, 2),
+               round(tel.mem_total_gb, 1), tel.temp_available,
+               round(tel.cpu_load, 3), round(tel.temperature, 3),
+               round(tel.memory_pressure, 3))
+
+    # header clock: once a second
+    clk = time.strftime("%H:%M:%S")
+    if six:
+        P = MOD.HEADER.place(header_panel(L))
+        hb = P.bay("clock") if L.header.valid else Rect(0, 0, 0, 0)
+    else:
+        hb = L.header
+    if hb.valid:
+        reg = _region("clock", hb, (clk,), under, over,
+                      lambda c, lf: _draw_header(c, L, m, lf, static=False,
+                                                 live=True))
+        if reg:
+            out.append(reg)
+
+    # telemetry: when a sample lands or the displayed FPS changes
+    if L.readout.valid:
+        if six:
+            def rack(c, lf):
+                _draw_rack_live(c, L, tel, fps_i, frame_ms, m, lf)
+        else:
+            def rack(c, lf):
+                _draw_condensed(c, L.readout, L, tel, fps_i, frame_ms, m, lf)
+        reg = _region("rack", L.readout, (tel_key, fps_i, hist_v), under,
+                      over, rack)
+        if reg:
+            out.append(reg)
+
+    # selector keys: on input only
+    if L.show_controls and L.controls.valid:
+        kkey = (m.active, m.pressed, m.focus, m.disabled, m.mode_state,
+                m.cycle_state)
+        reg = _region("keys", L.controls, kkey, under, over,
+                      lambda c, lf: _draw_controls(c, L, m, lf, static=False,
+                                                   live=True))
+        if reg:
+            out.append(reg)
+    return out
+
+
+def draw_under(cr, L: Layout, m: ConsoleModel, vp_scale: float = 1.0) -> None:
+    """Everything BEHIND the organism (headless / cairo path)."""
+    surf = layer_under(L, m)
+    if surf is not None:
         _blit(cr, surf)
-    _draw_field_live(cr, L, m)
 
 
 def draw_over(cr, L: Layout, tel: Telemetry, fps: float, frame_ms: float,
               m: ConsoleModel, light: LightField) -> None:
-    """Everything IN FRONT of the organism, then the light pass."""
-    light.clear()
-    w, h = int(round(L.width)), int(round(L.height))
-    key = _layer_key(L, m)
-    dummy = LightField()
+    """Everything IN FRONT of the organism (headless / cairo path).
 
-    def paint(c2):
-        _draw_stage(c2, L, m, dummy)
-        _draw_header(c2, L, m, dummy, static=True, live=False)
-        _draw_controls(c2, L, m, dummy, static=True, live=False)
-        _draw_footer(c2, L, m)
-
-    surf = _cached_layer(_OVER_CACHE, key, w, h, paint)
-    if surf is None:
-        paint(cr)
-    else:
-        _blit(cr, surf)
-
-    # The stage's own glow is an emitter, not pixels, so it is re-added each
-    # frame rather than being baked into the cached plate.
-    glass = stage_content(L)
-    if glass.valid:
-        light.glow(glass, L_CYAN, 0.07, spread=0.40)
-    _draw_header(cr, L, m, light, static=False, live=True)
-    _draw_modules(cr, L, tel, fps, frame_ms, m, light)
-    _draw_controls(cr, L, m, light, static=False, live=True)
-    light.paint(cr)
+    Composed from exactly the same static layers and regions the live widget
+    uploads as textures, so a headless frame IS a live frame.
+    """
+    under = layer_under(L, m)
+    over = layer_over(L, m, tel)
+    if over is not None:
+        _blit(cr, over)
+    for reg in regions(L, m, tel, fps, frame_ms, under, over):
+        cr.save()
+        cr.set_source_surface(reg.surface, reg.rect.x, reg.rect.y)
+        cr.rectangle(reg.rect.x, reg.rect.y, reg.rect.w, reg.rect.h)
+        cr.fill()
+        cr.restore()
