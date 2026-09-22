@@ -39,8 +39,10 @@ from abyssal.core.theme import (  # noqa: E402
     ABYSS,
     AMBER,
     CYAN,
+    FONT_DISPLAY,
     FONT_MONO,
     FONT_MONO_FALLBACK,
+    FONT_TECH,
     FRAME,
     INK,
     INK_BRIGHT,
@@ -49,6 +51,11 @@ from abyssal.core.theme import (  # noqa: E402
     RULE,
     rgba,
 )
+from .fonts import ensure_user_fonts  # noqa: E402
+
+# The bundled display faces must be visible to fontconfig before the first
+# Pango font map is built, so this runs before the context below is created.
+ensure_user_fonts()
 
 __all__ = ["draw_background", "draw_chrome"]
 
@@ -70,6 +77,8 @@ _W_NORMAL = Pango.Weight.NORMAL
 _W_MEDIUM = Pango.Weight.MEDIUM
 
 _FAMILY = "%s,%s,monospace" % (FONT_MONO, FONT_MONO_FALLBACK)
+_FAMILY_HERO = "%s,%s,monospace" % (FONT_DISPLAY, FONT_MONO)
+_FAMILY_LABEL = "%s,%s,monospace" % (FONT_TECH, FONT_MONO)
 
 _LABELS = ("CPU", "TEMP", "MEM", "FPS")
 # (index, warns?) -- FPS never warns; a high frame rate is not a fault.
@@ -108,12 +117,12 @@ _BG_TOP_SPAN = 0.40
 _BG_BOT_SPAN = 0.32
 
 
-def _fd(size: float, weight: int) -> Pango.FontDescription:
-    key = (size, weight)
+def _fd(size: float, weight: int, family: str = "") -> Pango.FontDescription:
+    key = (size, weight, family)
     fd = _FD_CACHE.get(key)
     if fd is None:
         fd = Pango.FontDescription()
-        fd.set_family(_FAMILY)
+        fd.set_family(family or _FAMILY)
         fd.set_weight(weight)
         fd.set_absolute_size(int(size * _SCALE))
         _FD_CACHE[key] = fd
@@ -132,10 +141,11 @@ def _attrs(tracking: float) -> Pango.AttrList | None:
     return al
 
 
-def _prepare(text: str, size: float, weight: int, tracking: float) -> None:
+def _prepare(text: str, size: float, weight: int, tracking: float,
+             family: str = "") -> None:
     _LAY.set_width(-1)
     _LAY.set_ellipsize(Pango.EllipsizeMode.NONE)
-    _LAY.set_font_description(_fd(size, weight))
+    _LAY.set_font_description(_fd(size, weight, family))
     _LAY.set_attributes(_attrs(tracking))
     _LAY.set_text(text, -1)
 
@@ -144,7 +154,8 @@ _TW_CACHE: dict[tuple, float] = {}
 _TW_LIMIT = 4096
 
 
-def _text_w(text: str, size: float, weight: int, tracking: float) -> float:
+def _text_w(text: str, size: float, weight: int, tracking: float,
+            family: str = "") -> float:
     """Visual advance width, with the trailing half letter-space removed.
 
     Memoised: the console asks for the same measurements every frame to make
@@ -154,11 +165,11 @@ def _text_w(text: str, size: float, weight: int, tracking: float) -> float:
     """
     if not text:
         return 0.0
-    key = (text, round(size, 2), weight, round(tracking, 3))
+    key = (text, round(size, 2), weight, round(tracking, 3), family)
     hit = _TW_CACHE.get(key)
     if hit is not None:
         return hit
-    _prepare(text, size, weight, tracking)
+    _prepare(text, size, weight, tracking, family)
     w = max(0.0, _LAY.get_size()[0] / _SCALE - tracking)
     if len(_TW_CACHE) >= _TW_LIMIT:
         _TW_CACHE.clear()
@@ -166,12 +177,12 @@ def _text_w(text: str, size: float, weight: int, tracking: float) -> float:
     return w
 
 
-def _cap(size: float, weight: int = _W_NORMAL) -> float:
+def _cap(size: float, weight: int = _W_NORMAL, family: str = "") -> float:
     """Cap height in px -- the visual height of an all-caps line."""
-    key = (size, weight)
+    key = (size, weight, family)
     c = _CAP_CACHE.get(key)
     if c is None:
-        _prepare("H", size, weight, 0.0)
+        _prepare("H", size, weight, 0.0, family)
         ink = _LAY.get_extents()[0]
         c = ink.height / _SCALE
         if c <= 0.0:
@@ -203,11 +214,11 @@ def _fit(text: str, size: float, weight: int, tracking: float,
 
 def _show(cr, text: str, size: float, weight: int, tracking: float,
           x: float, baseline: float, rgb, alpha: float = 1.0,
-          align: str = "l", max_w: float = -1.0) -> float:
+          align: str = "l", max_w: float = -1.0, family: str = "") -> float:
     """Draw one line, positioned by baseline. Returns its visual width."""
     if not text or size < MIN_PT - 0.01:
         return 0.0
-    _prepare(text, size, weight, tracking)
+    _prepare(text, size, weight, tracking, family)
     w = _LAY.get_size()[0] / _SCALE - tracking
     if max_w > 0.0 and w > max_w:
         # last-resort guard: ellipsize rather than bleed out of the rect

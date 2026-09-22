@@ -53,7 +53,7 @@ from ..telemetry.history import History
 from . import segment as SEG
 from . import selector as SEL
 from .chrome import (_cap, _show as _show_raw, _text_w, _W_MEDIUM,
-                     _W_NORMAL, draw_background)
+                     _W_NORMAL, draw_background, _FAMILY_HERO, _FAMILY_LABEL)
 
 TAU = math.tau
 
@@ -80,7 +80,7 @@ _TXT_LIMIT = 700
 
 def _show(cr, text: str, size: float, weight: int, tracking: float,
           x: float, baseline: float, rgb, alpha: float = 1.0,
-          align: str = "l", max_w: float = -1.0) -> float:
+          align: str = "l", max_w: float = -1.0, family: str = "") -> float:
     """Draw one line of instrument text, via a cache of rendered glyph runs.
 
     The console draws on the order of 140 strings a frame and almost all of
@@ -88,20 +88,20 @@ def _show(cr, text: str, size: float, weight: int, tracking: float,
     byte-identical from frame to frame. Shaping and rasterising them every time
     was the single largest cost in the draw.
 
-    Each distinct (text, size, weight, tracking, colour, alpha, align, max_w)
-    is rasterised once into a small surface and then blitted. The key is the
-    complete set of inputs, so this cannot change what is drawn; a miss costs
-    one ordinary render. Positions are rounded to whole pixels, which also
-    stops microcopy shimmering as values change around it.
+    Each distinct (text, size, weight, tracking, colour, alpha, align, max_w,
+    family) is rasterised once into a small surface and then blitted. The key
+    is the complete set of inputs, so this cannot change what is drawn; a miss
+    costs one ordinary render. Positions are rounded to whole pixels, which
+    also stops microcopy shimmering as values change around it.
     """
     if not text or size < 1.0:
         return 0.0
     key = (text, round(size, 2), weight, round(tracking, 3), align,
            round(max_w, 1), round(rgb[0], 3), round(rgb[1], 3),
-           round(rgb[2], 3), round(alpha, 3), hidpi.scale())
+           round(rgb[2], 3), round(alpha, 3), hidpi.scale(), family)
     ent = _TXT.get(key)
     if ent is None:
-        w = _text_w(text, size, weight, tracking)
+        w = _text_w(text, size, weight, tracking, family)
         if max_w > 0.0:
             w = min(w, max_w)
         pad = max(3.0, size * 0.8)
@@ -111,7 +111,7 @@ def _show(cr, text: str, size: float, weight: int, tracking: float,
         surf = hidpi.surface(sw, sh)
         c2 = cairo.Context(surf)
         _show_raw(c2, text, size, weight, tracking, pad, base_in,
-                  rgb, alpha, "l", max_w)
+                  rgb, alpha, "l", max_w, family)
         surf.flush()
         ent = (surf, w, pad, base_in)
         _TXT[key] = ent
@@ -165,6 +165,10 @@ class ConsoleModel:
     aperture: str = "f/1.8"
     flux: float = 0.0
     surge: float = 0.0
+    #: Diagnostics overlay (F1). The engraved identifier ledge - the grey
+    #: `01 AQS-0042` line under each key - belongs to the service view only:
+    #: in the polished console the keys carry their own identity.
+    diag: bool = False
 
 
 
@@ -505,20 +509,20 @@ def bay_inner(r: Rect, sx: float = 1.0, sy: float = 1.0) -> Rect:
 
 
 def _elide(text: str, size: float, weight: int, tracking: float,
-           max_w: float) -> str:
+           max_w: float, family: str = "") -> str:
     """Shorten `text` until it fits `max_w`, ending in a single ellipsis.
 
-    Measured, not estimated: a monospace face still has per-glyph tracking and
-    the caller's letter-spacing on top, so guessing character counts clips.
+    Measured, not estimated: every face has per-glyph advances and the
+    caller's letter-spacing on top, so guessing character counts clips.
     """
     if max_w <= 0.0 or not text:
         return ""
-    if _text_w(text, size, weight, tracking) <= max_w:
+    if _text_w(text, size, weight, tracking, family) <= max_w:
         return text
     lo, hi = 0, len(text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if _text_w(text[:mid] + "\u2026", size, weight, tracking) <= max_w:
+        if _text_w(text[:mid] + "\u2026", size, weight, tracking, family) <= max_w:
             lo = mid
         else:
             hi = mid - 1
@@ -526,14 +530,14 @@ def _elide(text: str, size: float, weight: int, tracking: float,
 
 
 def fit_first(cands, size: float, weight: int, tracking: float,
-              max_w: float) -> str:
+              max_w: float, family: str = "") -> str:
     """The longest of `cands` (longest first) that fits `max_w` whole.
 
     Labels on this machine are shown complete or in a deliberately shorter
     form - never ellipsised mid-word. Empty string if none fits.
     """
     for c in cands:
-        if c and _text_w(c, size, weight, tracking) <= max_w:
+        if c and _text_w(c, size, weight, tracking, family) <= max_w:
             return c
     return ""
 
@@ -541,7 +545,7 @@ def fit_first(cands, size: float, weight: int, tracking: float,
 def bay_line(cr, r: Rect, text: str, size: float, weight: int, tracking: float,
              rgb, alpha: float = 1.0, align: str = "l",
              baseline: float | None = None, x: float | None = None,
-             min_size: float = MIN_TEXT) -> float:
+             min_size: float = MIN_TEXT, family: str = "") -> float:
     """One line of type inside a bay. Returns the width actually drawn.
 
     `baseline` is an absolute y; when omitted the line is centred on the bay's
@@ -559,23 +563,23 @@ def bay_line(cr, r: Rect, text: str, size: float, weight: int, tracking: float,
         return 0.0
     # Shrink before ellipsising: a slightly smaller full label beats a clipped
     # one, but only down to the legibility floor.
-    while sz > min_size and _text_w(text, sz, weight, tracking) > avail:
+    while sz > min_size and _text_w(text, sz, weight, tracking, family) > avail:
         sz = max(min_size, sz - 0.5)
-    txt = _elide(text, sz, weight, tracking, avail)
+    txt = _elide(text, sz, weight, tracking, avail, family)
     if not txt:
         return 0.0
-    base = baseline if baseline is not None else (r.cy + _cap(sz) * 0.5)
+    base = baseline if baseline is not None else (r.cy + _cap(sz, family=family) * 0.5)
     if x is not None:
         ax = x
     else:
         ax = r.x if align == "l" else (r.right if align == "r" else r.cx)
     return _show(cr, txt, sz, weight, tracking, ax, base, rgb, alpha, align,
-                 avail)
+                 avail, family)
 
 
 def bay_pair(cr, r: Rect, key: str, value: str, size: float, t,
              value_rgb=INK_BRIGHT, key_rgb=INK_TECH, alpha: float = 1.0,
-             baseline: float | None = None) -> None:
+             baseline: float | None = None, family: str = "") -> None:
     """A KEY / VALUE pair sharing one bay line: key left, value right of it.
 
     The key column is measured from the key actually present, so a long key
@@ -584,17 +588,20 @@ def bay_pair(cr, r: Rect, key: str, value: str, size: float, t,
     if not r.valid:
         return
     sz = max(MIN_TEXT, size)
-    base = baseline if baseline is not None else (r.cy + _cap(sz) * 0.5)
+    base = (baseline if baseline is not None
+            else r.cy + _cap(sz, family=family) * 0.5)
     kw = _show(cr, key, sz, _W_NORMAL, t.tracking, r.x, base, key_rgb,
-               0.98 * alpha, "l", r.w * 0.62)
+               0.98 * alpha, "l", r.w * 0.62, family)
     vx = r.x + kw + sz * 0.85
     if r.right - vx > sz:
-        bay_line(cr, Rect(vx, r.y, r.right - vx, r.h), value, sz, _W_MEDIUM,
-                 t.tracking * 0.5, value_rgb, 0.96 * alpha, "l", base)
+        bay_line(cr, Rect(vx, r.y, r.right - vx, r.h), value, sz, _W_NORMAL,
+                 t.tracking * 0.5, value_rgb, 0.96 * alpha, "l", base,
+                 family=family)
 
 
 def bay_stack(cr, r: Rect, key: str, value: str, k_size: float, v_size: float,
-              t, value_rgb=INK_BRIGHT, alpha: float = 1.0) -> None:
+              t, value_rgb=INK_BRIGHT, alpha: float = 1.0,
+              family: str = "") -> None:
     """A KEY above its VALUE, both inside one bay, on fixed baselines.
 
     This is the archive-rail arrangement: the key is a fixed micro caption
@@ -604,18 +611,21 @@ def bay_stack(cr, r: Rect, key: str, value: str, k_size: float, v_size: float,
         return
     ks = max(MIN_TEXT, k_size)
     vs = max(MIN_TEXT, v_size)
-    stack = _cap(ks) * 1.15 + _cap(vs) * 1.45
+    stack = _cap(ks, family=family) * 1.15 + _cap(vs, family=family) * 1.45
     if stack > r.h:
         # Not enough recess for two lines. The VALUE is what the bay exists
         # to show, so the caption goes rather than both being clipped.
-        bay_line(cr, r, value, min(vs, r.h * 0.86), _W_MEDIUM,
-                 t.tracking * 0.5, value_rgb, 0.96 * alpha, "l")
+        bay_line(cr, r, value, min(vs, r.h * 0.86), _W_NORMAL,
+                 t.tracking * 0.5, value_rgb, 0.96 * alpha, "l",
+                 family=family)
         return
     top = r.y + max(0.0, (r.h - stack) * 0.5)
     bay_line(cr, r, key, ks, _W_NORMAL, t.tracking, INK_DIM, 0.82 * alpha, "l",
-             top + _cap(ks))
-    bay_line(cr, r, value, vs, _W_MEDIUM, t.tracking * 0.5, value_rgb,
-             0.96 * alpha, "l", top + _cap(ks) * 1.15 + _cap(vs) * 1.30)
+             top + _cap(ks, family=family), family=family)
+    bay_line(cr, r, value, vs, _W_NORMAL, t.tracking * 0.5, value_rgb,
+             0.96 * alpha, "l",
+             top + _cap(ks, family=family) * 1.15 + _cap(vs, family=family) * 1.30,
+             family=family)
 
 
 def header_panel(L: Layout) -> Rect:
@@ -659,44 +669,53 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
     P = MOD.HEADER.place(r) if not static else MOD.HEADER.draw(cr, r)
 
     # --- bay 1: instrument name over specimen name ------------------------
+    # The two hero lines are the console's display type: Astro, the face the
+    # major titles are set in. Sizes stay honest by measuring Astro itself.
     b = bay_inner(P.bay("title")) if static else Rect(0, 0, 0, 0)
     if b.valid:
         two = b.h >= 26.0
         name_sz = min(t.specimen, b.h * (0.46 if two else 0.86))
         title_sz = min(t.title, b.h * 0.30)
         if two:
-            stack = _cap(title_sz) * 1.20 + _cap(name_sz) * 1.36
+            stack = (_cap(title_sz, family=_FAMILY_HERO) * 1.20
+                     + _cap(name_sz, family=_FAMILY_HERO) * 1.36)
             top = b.y + max(0.0, (b.h - stack) * 0.5)
             bay_line(cr, b, "ABYSSAL ORGANISM MONITOR", title_sz, _W_NORMAL,
-                     t.tracking, INK_TECH, 0.96, "l", top + _cap(title_sz))
-            base2 = top + _cap(title_sz) * 1.20 + _cap(name_sz) * 1.30
+                     t.tracking, INK_TECH, 0.96, "l", top + _cap(title_sz, family=_FAMILY_HERO),
+                     family=_FAMILY_HERO)
+            base2 = (top + _cap(title_sz, family=_FAMILY_HERO) * 1.20
+                     + _cap(name_sz, family=_FAMILY_HERO) * 1.30)
             lead = _show(cr, "SPECIMEN", title_sz, _W_NORMAL, t.tracking,
-                         b.x, base2, INK_TECH, 0.80, "l")
+                         b.x, base2, INK_TECH, 0.80, "l", family=_FAMILY_LABEL)
             nx = b.x + lead + title_sz * 1.1
             bay_line(cr, Rect(nx, b.y, b.right - nx, b.h), sp.name, name_sz,
-                     _W_MEDIUM, t.tracking * 0.7, INK_BRIGHT, 1.0, "l", base2)
+                     _W_NORMAL, t.tracking * 0.7, INK_BRIGHT, 1.0, "l", base2,
+                     family=_FAMILY_HERO)
         else:
-            bay_line(cr, b, sp.name, name_sz, _W_MEDIUM, t.tracking * 0.7,
-                     INK_BRIGHT, 1.0, "l")
+            bay_line(cr, b, sp.name, name_sz, _W_NORMAL, t.tracking * 0.7,
+                     INK_BRIGHT, 1.0, "l", family=_FAMILY_HERO)
 
     # --- bay 2: vernacular name over the terminal designation -------------
     b = bay_inner(P.bay("epithet")) if static else Rect(0, 0, 0, 0)
     if b.valid:
         sub_sz = min(t.subtitle * 1.30, b.h * 0.46)
         micro_sz = max(MIN_TEXT, min(t.micro * 0.92, b.h * 0.30))
-        stack = _cap(sub_sz) * 1.28 + _cap(micro_sz) * 1.50
+        stack = (_cap(sub_sz, family=_FAMILY_HERO) * 1.28
+                 + _cap(micro_sz, family=_FAMILY_LABEL) * 1.50)
         if stack > b.h:
             # One line or none: the terminal designation is the line to lose.
             bay_line(cr, b, sp.epithet, min(sub_sz, b.h * 0.88), _W_NORMAL,
-                     t.tracking * 1.5, INK_BRIGHT, 0.94, "c")
+                     t.tracking * 1.5, INK_BRIGHT, 0.94, "c",
+                     family=_FAMILY_HERO)
         else:
             top = b.y + max(0.0, (b.h - stack) * 0.5)
             ew = bay_line(cr, b, sp.epithet, sub_sz, _W_NORMAL,
                           t.tracking * 1.5, INK_BRIGHT, 0.94, "c",
-                          top + _cap(sub_sz))
+                          top + _cap(sub_sz, family=_FAMILY_HERO),
+                          family=_FAMILY_HERO)
             # Rule marks either side of the name, as the reference sets it.
             # Sized FROM the drawn text, so they can never cross it.
-            ry = top + _cap(sub_sz) * 0.5
+            ry = top + _cap(sub_sz, family=_FAMILY_HERO) * 0.5
             rl = min(sub_sz * 1.6, (b.w - ew) * 0.5 - sub_sz * 0.8)
             if rl > sub_sz * 0.6:
                 for sgn in (-1.0, 1.0):
@@ -705,11 +724,12 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
                               ry, INK_BRIGHT, 0.70)
             cap_txt = fit_first(("BIOCOMPUTATIONAL OBSERVATION TERMINAL",
                                  "OBSERVATION TERMINAL"), micro_sz, _W_NORMAL,
-                                t.tracking, b.w)
+                                t.tracking, b.w, _FAMILY_LABEL)
             if cap_txt:
                 _show(cr, cap_txt, micro_sz, _W_NORMAL, t.tracking, b.cx,
-                      top + _cap(sub_sz) * 1.28 + _cap(micro_sz) * 1.40,
-                      INK_TECH, 0.82, "c")
+                      top + _cap(sub_sz, family=_FAMILY_HERO) * 1.28
+                      + _cap(micro_sz, family=_FAMILY_LABEL) * 1.40,
+                      INK_TECH, 0.82, "c", family=_FAMILY_LABEL)
 
     # --- bay 3: the LIVE annunciator, in the boss the asset provides ------
     lamp = P.bay("live_lamp") if static else Rect(0, 0, 0, 0)
@@ -723,8 +743,8 @@ def _draw_header(cr, L: Layout, m: ConsoleModel, light: LightField,
         light.add(lamp.cx, lamp.cy, d * 2.2, L_CHART, 0.18)
     if win.valid:
         wi = bay_inner(win, sx=0.8, sy=0.5)
-        bay_line(cr, wi, "LIVE", min(t.label, wi.h * 0.86), _W_MEDIUM,
-                 t.tracking, LIME, 0.97, "c")
+        bay_line(cr, wi, "LIVE", min(t.label, wi.h * 0.86), _W_NORMAL,
+                 t.tracking, LIME, 0.97, "c", family=_FAMILY_LABEL)
 
     # --- bay 4: date over the running clock -------------------------------
     # The clock is the one genuinely per-frame readout in this fascia, so it
@@ -764,12 +784,13 @@ def _draw_status_bays(cr, P, L: Layout, m: ConsoleModel) -> None:
         if not b.valid or b.w < 150.0 or b.h < MIN_TEXT + 1.0:
             continue
         sz = max(MIN_TEXT, min(t.micro * 1.14, b.h * 0.86))
-        base = b.cy + _cap(sz) * 0.5
+        base = b.cy + _cap(sz, family=_FAMILY_LABEL) * 0.5
 
         def need(pr) -> float:
             k, v, _ = pr
-            return (_text_w(k, sz, _W_NORMAL, t.tracking) + sz * 0.85
-                    + _text_w(v, sz, _W_MEDIUM, t.tracking * 0.5) + sz * 1.2)
+            return (_text_w(k, sz, _W_NORMAL, t.tracking, _FAMILY_LABEL) + sz * 0.85
+                    + _text_w(v, sz, _W_NORMAL, t.tracking * 0.5, _FAMILY_LABEL)
+                    + sz * 1.2)
 
         # Whole pairs only: the second pair is dropped before anything is
         # ellipsised. Pairs sit on even stations when they fit them, and
@@ -785,7 +806,8 @@ def _draw_status_bays(cr, P, L: Layout, m: ConsoleModel) -> None:
             k, v, col = pr
             x = max(x, b.x + j * station)
             cell = Rect(x, b.y, b.right - x, b.h)
-            bay_pair(cr, cell, k, v, sz, t, value_rgb=col, baseline=base)
+            bay_pair(cr, cell, k, v, sz, t, value_rgb=col, baseline=base,
+                     family=_FAMILY_LABEL)
             x += need(pr)
 
 
@@ -812,16 +834,20 @@ def _draw_header_compact(cr, L: Layout, r: Rect, m: ConsoleModel,
     name_sz = min(t.specimen, inner.h * (0.46 if two else 0.70))
     if two:
         tsz = min(t.title, inner.h * 0.26)
-        stack = _cap(tsz) * 1.20 + _cap(name_sz) * 1.34
+        stack = (_cap(tsz, family=_FAMILY_HERO) * 1.20
+                 + _cap(name_sz, family=_FAMILY_HERO) * 1.34)
         top = inner.y + max(0.0, (inner.h - stack) * 0.5)
         bay_line(cr, left, "ABYSSAL ORGANISM MONITOR", tsz, _W_NORMAL,
-                 t.tracking, INK, 0.78, "l", top + _cap(tsz))
-        bay_line(cr, left, sp.name, name_sz, _W_MEDIUM, t.tracking * 0.7,
+                 t.tracking, INK, 0.78, "l", top + _cap(tsz, family=_FAMILY_HERO),
+                 family=_FAMILY_HERO)
+        bay_line(cr, left, sp.name, name_sz, _W_NORMAL, t.tracking * 0.7,
                  INK_BRIGHT, 1.0, "l",
-                 top + _cap(tsz) * 1.20 + _cap(name_sz) * 1.28)
+                 top + _cap(tsz, family=_FAMILY_HERO) * 1.20
+                 + _cap(name_sz, family=_FAMILY_HERO) * 1.28,
+                 family=_FAMILY_HERO)
     else:
-        bay_line(cr, left, sp.name, name_sz, _W_MEDIUM, t.tracking * 0.7,
-                 INK_BRIGHT, 1.0, "l")
+        bay_line(cr, left, sp.name, name_sz, _W_NORMAL, t.tracking * 0.7,
+                 INK_BRIGHT, 1.0, "l", family=_FAMILY_HERO)
 
     rx = inner.x + inner.w * 0.64
     if not static:
@@ -839,8 +865,8 @@ def _draw_header_compact(cr, L: Layout, r: Rect, m: ConsoleModel,
         light.add(bay.x + d * 0.6, bay.cy, d * 2.2, L_CHART, 0.16)
     lw = bay_line(cr if static else _NULL_CR,
                   Rect(lx, bay.y, bay.right - lx, bay.h), "LIVE",
-                  min(t.label, bay.h * 0.68), _W_MEDIUM, t.tracking, LIME,
-                  0.96, "l")
+                  min(t.label, bay.h * 0.68), _W_NORMAL, t.tracking, LIME,
+                  0.96, "l", family=_FAMILY_LABEL)
     cx0 = lx + lw + d * 0.5
     if live and not static and bay.right - cx0 > 54.0:
         dh = min(bay.h * 0.80, 16.0)
@@ -1298,12 +1324,12 @@ def _rack_graph_static(cr, well: Rect, sc: _Scale, t) -> None:
         _show(cr, sc.ticks[2], vs, _W_NORMAL, t.tracking * 0.4, tx,
               plot.bottom - 2.0, INK_TECH, 0.62, "l")
     if cap.h > 0.0:
-        base = cap.cy + _cap(sz) * 0.5
+        base = cap.cy + _cap(sz, family=_FAMILY_LABEL) * 0.5
         span_w = _show(cr, "60 s", sz, _W_NORMAL, t.tracking * 0.5, cap.right,
                        base, INK_TECH, 0.62, "r")
         bay_line(cr, Rect(cap.x, cap.y, cap.w - span_w - sz, cap.h),
                  sc.caption, sz, _W_NORMAL, t.tracking * 0.6, INK_TECH, 0.86,
-                 "l", base)
+                 "l", base, family=_FAMILY_LABEL)
 
 
 _TRACE_CACHE: "OrderedDict[tuple, cairo.ImageSurface]" = OrderedDict()
@@ -1389,27 +1415,28 @@ def _rack_state(cr, well: Rect, word: str, rgb, t) -> None:
         return
     ksz = max(MIN_TEXT, min(t.micro * 0.84, r.h * 0.16))
     vsz = max(MIN_TEXT, min(t.label * 1.10, r.h * 0.26, r.w * 0.22))
-    gap = _cap(ksz) * 1.1
-    stack = _cap(ksz) + gap + _cap(vsz)
+    gap = _cap(ksz, family=_FAMILY_LABEL) * 1.1
+    stack = _cap(ksz, family=_FAMILY_LABEL) + gap + _cap(vsz, family=_FAMILY_LABEL)
     top = r.cy - stack * 0.5
     # The full word, shrunk by at most a quarter; then the short form.
     full = word
     word = ""
     for sz in (vsz, vsz * 0.9, vsz * 0.8, vsz * 0.75):
         sz = max(MIN_TEXT, sz)
-        if _text_w(full, sz, _W_MEDIUM, t.tracking * 0.3) <= r.w:
+        if _text_w(full, sz, _W_NORMAL, t.tracking * 0.3, _FAMILY_LABEL) <= r.w:
             word, vsz = full, sz
             break
     if not word:
-        word = fit_first(_STATE_SHORT.get(full, ()), vsz, _W_MEDIUM,
-                         t.tracking * 0.3, r.w)
+        word = fit_first(_STATE_SHORT.get(full, ()), vsz, _W_NORMAL,
+                         t.tracking * 0.3, r.w, _FAMILY_LABEL)
     if not word:
         return
-    if _text_w("STATE", ksz, _W_NORMAL, t.tracking * 0.8) <= r.w:
+    if _text_w("STATE", ksz, _W_NORMAL, t.tracking * 0.8, _FAMILY_LABEL) <= r.w:
         _show(cr, "STATE", ksz, _W_NORMAL, t.tracking * 0.8, r.cx,
-              top + _cap(ksz), INK_TECH, 0.72, "c")
-    _show(cr, word, vsz, _W_MEDIUM, t.tracking * 0.3, r.cx, top + stack, rgb,
-          0.98, "c")
+              top + _cap(ksz, family=_FAMILY_LABEL), INK_TECH, 0.72, "c",
+              family=_FAMILY_LABEL)
+    _show(cr, word, vsz, _W_NORMAL, t.tracking * 0.3, r.cx, top + stack, rgb,
+          0.98, "c", family=_FAMILY_LABEL)
 
 
 def _rack_placed(L: Layout):
@@ -1437,16 +1464,16 @@ def _draw_rack_static(cr, L: Layout, tel: Telemetry) -> None:
         tb = tb.inset(max(3.0, tb.h * 0.30), 0.0)
         if tb.valid:
             tsz = max(MIN_TEXT, min(t.label * 1.15, tb.h * 0.70))
-            base = tb.cy + _cap(tsz) * 0.5
-            tw = bay_line(cr, tb, ch.title, tsz, _W_MEDIUM, t.tracking,
-                          INK_BRIGHT, 0.97, "l", base)
+            base = tb.cy + _cap(tsz, family=_FAMILY_LABEL) * 0.5
+            tw = bay_line(cr, tb, ch.title, tsz, _W_NORMAL, t.tracking,
+                          INK_BRIGHT, 0.97, "l", base, family=_FAMILY_LABEL)
             sx = tb.x + tw + tsz * 1.2
             ssz = max(MIN_TEXT, min(t.micro * 0.90, tb.h * 0.50))
             sub = fit_first(ch.subs, ssz, _W_NORMAL, t.tracking,
-                            tb.right - sx)
+                            tb.right - sx, _FAMILY_LABEL)
             if sub:
                 _show(cr, sub, ssz, _W_NORMAL, t.tracking, tb.right, base,
-                      INK_TECH, 0.80, "r")
+                      INK_TECH, 0.80, "r", family=_FAMILY_LABEL)
         _rack_graph_static(cr, P.bay(f"r{i}_graph"),
                            _graph_scale(ch.key, tel), t)
 
@@ -1505,8 +1532,12 @@ def _draw_controls(cr, L: Layout, m: ConsoleModel, light: LightField,
         return
     if static:
         MOD.SELECTOR.draw(cr, L.controls)
-        t = L.type
-        if geo.ledge >= 5.0:
+        # The engraved channel identifiers are SERVICE type: they belong to
+        # the diagnostics view (F1), where naming every channel matters. The
+        # polished console leaves the ledge as clean metal - the keys carry
+        # their own engraved identity, and the keyboard 1-5 still selects.
+        if m.diag and geo.ledge >= 5.0:
+            t = L.type
             sz = max(MIN_TEXT, min(t.micro * 0.84, geo.ledge * 0.66))
             for i, sp in enumerate(CATALOGUE):
                 lr = geo.label_rect(i)
@@ -1577,7 +1608,8 @@ def _draw_footer(cr, L: Layout, m: ConsoleModel) -> None:
     P = MOD.FOOTER.draw(cr, r)
     # One line per bay, one type size for the whole rail, as the reference
     # rail reads. Values are the SHORT forms so none is ever ellipsised; the
-    # full archive record is in the header and the field.
+    # full archive record is in the header and the field. The rail is the
+    # machine's technical voice: Microgramma.
     vals = (("AOM-1",), (sp.archive,), (sp.cls.split()[0], "MATH."),
             (sp.origin, "SYNTH."), (sp.symmetry_short, sp.symmetry_short[:5]),
             ("LIVE",), (m.behavior, m.behavior[:4]))
@@ -1589,27 +1621,30 @@ def _draw_footer(cr, L: Layout, m: ConsoleModel) -> None:
     # one size for the rail: shrink (never below the floor) until every
     # value's FULL form fits, then fall back to short forms bay by bay
     while vsz > MIN_TEXT and any(
-            _text_w(v[0], vsz, _W_MEDIUM, t.tracking * 0.5) > bi.w
+            _text_w(v[0], vsz, _W_NORMAL, t.tracking * 0.5, _FAMILY_LABEL) > bi.w
             for v, bi in zip(vals, inner)):
         vsz = max(MIN_TEXT, vsz - 0.25)
     for v, bi in zip(vals, inner):
-        txt = fit_first(v, vsz, _W_MEDIUM, t.tracking * 0.5, bi.w)
+        txt = fit_first(v, vsz, _W_NORMAL, t.tracking * 0.5, bi.w,
+                        _FAMILY_LABEL)
         if bi.valid and txt:
-            _show(cr, txt, vsz, _W_MEDIUM, t.tracking * 0.5, bi.x,
-                  bi.cy + _cap(vsz) * 0.5, INK_BRIGHT, 0.92, "l")
+            _show(cr, txt, vsz, _W_NORMAL, t.tracking * 0.5, bi.x,
+                  bi.cy + _cap(vsz, family=_FAMILY_LABEL) * 0.5,
+                  INK_BRIGHT, 0.92, "l", family=_FAMILY_LABEL)
     tb = P.bay("terminal").inset(max(4.0, b0.h * 0.30), max(1.5, b0.h * 0.10))
     if tb.valid:
-        base = tb.cy + _cap(vsz) * 0.5
+        base = tb.cy + _cap(vsz, family=_FAMILY_LABEL) * 0.5
         w0 = _show(cr, "SYSTEM BUS", ksz, _W_NORMAL, t.tracking, tb.x,
-                   base, INK_TECH, 0.80, "l")
-        w1 = _show(cr, "ONLINE", vsz, _W_MEDIUM, t.tracking * 0.6,
-                   tb.x + w0 + vsz * 0.7, base, LIME, 0.96, "l")
+                   base, INK_TECH, 0.80, "l", family=_FAMILY_LABEL)
+        w1 = _show(cr, "ONLINE", vsz, _W_NORMAL, t.tracking * 0.6,
+                   tb.x + w0 + vsz * 0.7, base, LIME, 0.96, "l",
+                   family=_FAMILY_LABEL)
         mx = tb.x + w0 + w1 + vsz * 2.0
         motto = "OBSERVE · UNDERSTAND · EXTEND"
         # The motto is shown whole or not at all: an ellipsised motto is noise.
-        if _text_w(motto, ksz, _W_NORMAL, t.tracking) <= tb.right - mx:
+        if _text_w(motto, ksz, _W_NORMAL, t.tracking, _FAMILY_LABEL) <= tb.right - mx:
             _show(cr, motto, ksz, _W_NORMAL, t.tracking, tb.right, base,
-                  INK_DIM, 0.85, "r")
+                  INK_DIM, 0.85, "r", family=_FAMILY_LABEL)
 
 
 def _draw_footer_plain(cr, L: Layout, r: Rect, m: ConsoleModel) -> None:
@@ -1635,7 +1670,8 @@ def _draw_footer_plain(cr, L: Layout, r: Rect, m: ConsoleModel) -> None:
     for i, (k, v) in enumerate(bays):
         cell = Rect(inner.x + i * cw + cw * 0.06, inner.y, cw * 0.88, inner.h)
         bay_stack(cr, cell, k, v, size * 0.88, size, t,
-                  value_rgb=LIME if v == "ONLINE" else INK_BRIGHT)
+                  value_rgb=LIME if v == "ONLINE" else INK_BRIGHT,
+                  family=_FAMILY_LABEL)
         if i:
             _divider(cr, inner.x + i * cw - cw * 0.02, inner.y, inner.bottom,
                      0.7)
@@ -1682,7 +1718,7 @@ def _layer_key(L: Layout, m: ConsoleModel, mem_total: float = 0.0) -> tuple:
     return (int(round(L.width)), int(round(L.height)), L.state.value,
             m.species.key, m.active, m.behavior,
             L.show_chassis, L.show_footer, L.show_controls, L.show_status,
-            round(mem_total, 1), hidpi.scale())
+            round(mem_total, 1), hidpi.scale(), m.diag)
 
 
 def six_module(L: Layout) -> bool:

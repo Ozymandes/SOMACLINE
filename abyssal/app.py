@@ -118,7 +118,8 @@ class Monitor(Gtk.ApplicationWindow):
         self.history = History(TELEMETRY_HZ)
         self.model = console.ConsoleModel(species=by_index(self.species_index),
                                           active=self.species_index,
-                                          history=self.history)
+                                          history=self.history,
+                                          diag=opts.debug)
         self.light = LightField()
         self._press_until = 0.0
         self._press_index: int | None = None
@@ -256,6 +257,7 @@ class Monitor(Gtk.ApplicationWindow):
             self.close()
         elif name == "F1":
             self.show_debug = not self.show_debug
+            self.model.diag = self.show_debug
         elif name == "F2":
             self.show_calibration = not self.show_calibration
         elif name in ("f", "F", "F11"):

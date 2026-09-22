@@ -44,3 +44,12 @@ def rgba(c: RGB, a: float) -> tuple[float, float, float, float]:
 
 FONT_MONO = "JetBrainsMono Nerd Font"
 FONT_MONO_FALLBACK = "Noto Sans Mono"
+
+# Display faces, shipped in assets/fonts and installed by ui/fonts.py.
+#   FONT_DISPLAY  Astro        major titles: the instrument name, the
+#                            specimen's scientific name, the hero epithet
+#   FONT_TECH     Microgramma  technical/support type: rails, labels,
+#                            microcopy. Never numerics - those stay mono
+#                            and procedural.
+FONT_DISPLAY = "Astro"
+FONT_TECH = "Microgramma"

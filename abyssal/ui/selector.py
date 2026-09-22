@@ -77,6 +77,18 @@ _CYCLE_ASPECT = 192.0 / 113.0
 #: Mechanical travel of a pressed key, as a share of key height.
 PRESS_TRAVEL = 0.022
 
+#: The keys' seat, measured off the SELECTOR module at its authored size.
+#: The trough interior runs y 27..235 (source px), the aperture hole
+#: 65.5..203.5, the key bay 36.0..204.0 and the identifier ledge 207.5.
+#: At bay height a key left 10.6 px of dark trough above it and only 4.8 px
+#: below before the ledge divider - it read pushed UP out of its well.
+#: SEAT_DROP is one shared downward translation, in key heights, of half
+#: that difference, which balances the two reveals (7.6 above, 7.8 below)
+#: while keeping the key's shadow clear of the ledge band its diagnostics
+#: labels live in. One shared transform: equal scale, equal baseline and
+#: equal pitch are untouched.
+SEAT_DROP = 3.0 / 168.0
+
 
 @dataclass(frozen=True, slots=True)
 class BankGeometry:
@@ -145,8 +157,12 @@ def from_module(P, n: int = 5) -> BankGeometry:
         return layout(Rect(0.0, 0.0, 0.0, 0.0), n)
     lh = ledge.h if ledge.h >= _LEDGE_MIN else 0.0
     r = P.rect
+    # The measured seat: every key sits SEAT_DROP of its own height lower in
+    # its well (see the constant above). Hit testing, drawing and labels all
+    # read key_rect, so one field keeps them agreed.
     return BankGeometry(x=r.x, y=r.y, w=r.w, h=r.h,
-                        key_x=k0.x, key_y=k0.y, key_w=k0.w, key_h=k0.h,
+                        key_x=k0.x, key_y=k0.y + k0.h * SEAT_DROP,
+                        key_w=k0.w, key_h=k0.h,
                         pitch=k1.x - k0.x, ledge=lh, n=n,
                         aux_l=P.bay("rocker"), aux_r=P.bay("mode"),
                         ledge_y=ledge.y + (ledge.h - lh) * 0.5)
@@ -202,7 +218,7 @@ def layout(box: Rect, n: int = 5) -> BankGeometry:
         span = budget
 
     key_x = box.x + (box.w - span) * 0.5
-    key_y = box.y + (box.h - (key_h + ledge)) * 0.5
+    key_y = box.y + (box.h - (key_h + ledge)) * 0.5 + key_h * SEAT_DROP
 
     # Auxiliary seats in the metal left over at each end.
     end = key_x - box.x - wall
