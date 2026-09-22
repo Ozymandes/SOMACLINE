@@ -1,0 +1,19 @@
+[package]
+name = "floor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+gdk4 = "0.9"
+glib = "0.20"
+cairo-rs = "0.20"
+pango = "0.20"
+pangocairo = "0.20"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

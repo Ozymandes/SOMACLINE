@@ -1,0 +1,26 @@
+[package]
+name = "abyssal"
+version = "1.0.0"
+edition = "2021"
+description = "Abyssal Organism Monitor — native Rust port"
+default-run = "abyssal"
+
+[[bin]]
+name = "abyssal"
+path = "src/main.rs"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+gdk4 = "0.9"
+glib = "0.20"
+gio = "0.20"
+cairo-rs = "0.20"
+pango = "0.20"
+pangocairo = "0.20"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
