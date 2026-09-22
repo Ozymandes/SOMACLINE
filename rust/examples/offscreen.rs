@@ -7,24 +7,10 @@ use std::rc::Rc;
 
 
 fn surface_to_argb(surf: &cairo::ImageSurface) -> cairo::ImageSurface {
-    // cairo-rs refuses an exclusive data lend while any other reference
-    // (including a live Context) exists, so: blit into a fresh surface with
-    // the context scoped out, then read.
-    let mut s = surf.clone();
-    s.flush();
-    let (w, h, stride) = (s.width(), s.height(), s.stride());
-    let mut copy = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
-    {
-        let cr = cairo::Context::new(&copy).unwrap();
-        cr.set_source_surface(&s, 0.0, 0.0).unwrap();
-        cr.paint().unwrap();
-    }
-    copy.flush();
-    let data: Vec<u8> = {
-        let d = copy.data().unwrap();
-        d.to_vec()
-    };
-    cairo::ImageSurface::create_for_data(data, cairo::Format::ARgb32, w, h, stride).unwrap()
+    // The console cache holds a reference to every layer surface, so reading
+    // one needs an exclusive copy. hidpi::copy_exclusive preserves the device
+    // scale, which is what keeps the picture at full size.
+    abyssal::skin::hidpi::copy_exclusive(surf)
 }
 
 fn main() {
@@ -35,6 +21,7 @@ fn main() {
     let mut height = 880;
     let mut specimen = 0usize;
     let mut seconds = 6.0f64;
+    let mut ds = 1.0f64;
     while let Some(a) = args.next() {
         let mut val = || args.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         match a.as_str() {
@@ -42,12 +29,16 @@ fn main() {
             "--height" => height = val() as i32,
             "--specimen" => specimen = val() as usize,
             "--seconds" => seconds = val(),
+            "--ds" => ds = val(),
             _ => {}
         }
     }
     let (w, h) = (width.max(1), height.max(1));
     abyssal::ui::fonts::ensure_user_fonts();
-    abyssal::skin::hidpi::set_scale(1.0);
+    // `--ds` reproduces the live HiDPI path: the target is allocated at
+    // DEVICE resolution and carries the device scale, and every draw stays in
+    // LOGICAL coordinates - exactly what app.rs does with the widget's scale.
+    abyssal::skin::hidpi::set_scale(ds);
 
     // Normalised channels derived exactly as telemetry.source derives them.
     let tel = abyssal::signals::Telemetry {
@@ -75,7 +66,7 @@ fn main() {
         org.update(dt, &phys.update(dt, &tel, 0.0));
     }
 
-    let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).unwrap();
+    let surface = abyssal::skin::hidpi::surface(w as f64, h as f64);
     let cr = cairo::Context::new(&surface).unwrap();
     let l = abyssal::layout::resolve(w as f64, h as f64);
     let glass = abyssal::ui::console::stage_content(&l);
@@ -110,22 +101,18 @@ fn main() {
             history.borrow_mut().push(cpu, Some(tempc), mem, frame);
         }
     }
-    let mut light = abyssal::lighting::LightField::new();
+    let _light = abyssal::lighting::LightField::new();
     let mut renderer = abyssal::ui::console::Renderer::new();
     let under = renderer.layer_under(&l, &m);
     let over = renderer.layer_over(&l, &m, &tel);
     // Python draws console.draw_under / draw_over straight; the Rust cached
     // layers hold the same content - blit them at their natural logical size.
+    // The copies carry the cache surfaces' device scale, so cairo maps them
+    // back to LOGICAL size on its own - paint at logical coordinates.
     for layer in under.iter().chain(over.iter()) {
         let src = surface_to_argb(&layer.surface);
-        let lw = src.width();
-        let sc = lw as f64 / w as f64;
         cr.set_source_surface(&src, 0.0, 0.0).unwrap();
-        if (sc - 1.0).abs() > 1e-9 {
-            cr.scale(1.0 / sc, 1.0 / sc);
-        }
         cr.paint().unwrap();
-        cr.identity_matrix();
     }
     if l.stage.valid() {
         let _ = cr.rectangle(glass.x, glass.y, glass.w, glass.h);
@@ -140,17 +127,11 @@ fn main() {
             continue;
         }
         let src = surface_to_argb(&reg.layer.surface);
-        let lw = src.width();
-        let sc = lw as f64 / reg.rect.w.max(1.0);
         cr.set_source_surface(&src, reg.rect.x, reg.rect.y).unwrap();
-        if (sc - 1.0).abs() > 1e-9 {
-            cr.scale(1.0 / sc, 1.0 / sc);
-        }
         cr.paint().unwrap();
-        cr.identity_matrix();
     }
     surface.flush();
     let mut png = std::fs::File::create(&out).unwrap();
     surface.write_to_png(&mut png).unwrap();
-    println!("{out}  {w}x{h} specimen {specimen}");
+    println!("{out}  {w}x{h} ds {ds} specimen {specimen}");
 }

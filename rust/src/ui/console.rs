@@ -371,6 +371,25 @@ fn null_cr() -> Context {
 // cache-key helpers: quantised floats hashed on bit patterns
 // ==========================================================================
 
+/// Python's `round()`: half-to-EVEN, not half-away-from-zero. The glyph-run
+/// blit lands on `round(ox - pad)`, and `ox` is a centre minus half a measured
+/// width, so exact .5 offsets are common; rounding them the other way puts a
+/// centred label one whole pixel off the Python original.
+#[inline]
+fn py_round(v: f64) -> f64 {
+    let f = v.floor();
+    let d = v - f;
+    if d > 0.5 {
+        f + 1.0
+    } else if d < 0.5 {
+        f
+    } else if (f as i64) % 2 == 0 {
+        f
+    } else {
+        f + 1.0
+    }
+}
+
 #[inline]
 fn bits(v: f64) -> u64 {
     // Normalise -0.0 so a negated zero cannot churn a cache key.
@@ -466,8 +485,11 @@ fn show(
             }
             let pad = (size * 0.8).max(3.0);
             let base_in = size * 1.7;
-            let sw = (w + pad * 2.0).max(1.0);
-            let sh = (base_in + size * 1.1 + pad).max(1.0);
+            // Python truncates the cache-surface size to whole logical px
+            // (`int(...)`) before hidpi allocates it; ceil()ing instead adds a
+            // transparent column but also a different device-pixel grid.
+            let sw = ((w + pad * 2.0) as i64).max(1) as f64;
+            let sh = ((base_in + size * 1.1 + pad) as i64).max(1) as f64;
             let surf = hidpi::surface(sw, sh);
             let c2 = Context::new(&surf).expect("txt context");
             chrome::show(&c2, text, size, weight, tracking, pad, base_in, rgb,
@@ -487,8 +509,8 @@ fn show(
         cr.save().ok();
         let _ = cr.set_source_surface(
             &surf,
-            (ox - pad).round(),
-            (baseline - base_in).round(),
+            py_round(ox - pad),
+            py_round(baseline - base_in),
         );
         let _ = cr.paint();
         cr.restore().ok();

@@ -152,14 +152,19 @@ fn cell_segments(w: f64, h: f64, t: f64, gap: f64) -> [(usize, char, f64, f64, f
     let vy_mid_hi = mid - gap * 0.5;
     let vy_mid_lo = mid + gap * 0.5;
     let vy_bot = h - gap - hh;
+    // Python keys this by segment identity (a dict); here the slot INDEX is
+    // the segment identity, because `draw` looks segments up as `geo[sid]`.
+    // Entries must therefore stay in SEG_A..SEG_G order. The ghost pass walks
+    // the whole array, and both passes fill with one colour, so the visiting
+    // order is not observable.
     [
         (SEG_A, 'h', hx0, yt, hx1, yt),
-        (SEG_D, 'h', hx0, yb, hx1, yb),
-        (SEG_G, 'h', hx0, mid, hx1, mid),
-        (SEG_F, 'v', xl, vy_top, xl, vy_mid_hi),
-        (SEG_E, 'v', xl, vy_mid_lo, xl, vy_bot),
         (SEG_B, 'v', xr, vy_top, xr, vy_mid_hi),
         (SEG_C, 'v', xr, vy_mid_lo, xr, vy_bot),
+        (SEG_D, 'h', hx0, yb, hx1, yb),
+        (SEG_E, 'v', xl, vy_mid_lo, xl, vy_bot),
+        (SEG_F, 'v', xl, vy_top, xl, vy_mid_hi),
+        (SEG_G, 'h', hx0, mid, hx1, mid),
     ]
 }
 

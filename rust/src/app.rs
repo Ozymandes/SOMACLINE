@@ -339,21 +339,17 @@ impl Core {
             return tex.clone();
         }
         // cairo-rs refuses an exclusive data lend while any other reference
-        // exists; the console cache always holds one. Blit into a fresh
-        // surface with the context scoped out, then read. Uploads happen only
-        // when a layer's content changes, so the copy is off the hot path.
-        let mut surf = layer.surface.clone();
-        surf.flush();
-        let (w, h, stride) = (surf.width(), surf.height(), surf.stride());
+        // exists; the console cache always holds one, so the upload goes
+        // through hidpi::copy_exclusive (which preserves the device scale -
+        // see its docs). Uploads happen only when a layer's content changes,
+        // so the copy is off the hot path.
+        let (w, h, stride) = (
+            layer.surface.width(),
+            layer.surface.height(),
+            layer.surface.stride(),
+        );
         let bytes: glib::Bytes = {
-            let mut copy = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h)
-                .expect("copy surface");
-            {
-                let cr = cairo::Context::new(&copy).expect("copy context");
-                cr.set_source_surface(&surf, 0.0, 0.0).expect("copy source");
-                cr.paint().expect("copy paint");
-            }
-            copy.flush();
+            let mut copy = crate::skin::hidpi::copy_exclusive(&layer.surface);
             let d = copy.data().expect("copy surface data");
             glib::Bytes::from(&d[..])
         };
@@ -427,8 +423,6 @@ pub mod imp {
     #[derive(Default)]
     pub struct MonitorViewImp {
         pub core: RefCell<Option<Core>>,
-        pub ds_logged: std::cell::Cell<bool>,
-        pub reg_logged: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -572,11 +566,6 @@ impl MonitorView {
 
         // LAYERS 0-1: background, shell, glass, graticule (static texture)
         let under = self.with_core(|core| core.renderer.layer_under(&layout, &core.model));
-        if self.with_core(|c| c.frames) % 60 == 0 {
-            if let Some(u) = &under {
-                eprintln!("DBG f={} under_dims={}x{} ds_raw={} hidpi={} widget={}x{}", self.with_core(|c| c.frames), u.surface.width(), u.surface.height(), device_scale(self), crate::skin::hidpi::scale(), self.width(), self.height());
-            }
-        }
         let over = self.with_core(|core| {
             core.renderer
                 .layer_over(&layout, &core.model, &core.telemetry)

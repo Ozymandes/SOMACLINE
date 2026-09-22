@@ -26,12 +26,14 @@ from abyssal.core.signals import Telemetry                  # noqa: E402
 from abyssal.core.viewport import Viewport                  # noqa: E402
 from abyssal.organism.render import draw_organism           # noqa: E402
 from abyssal.organism.species import by_index               # noqa: E402
+from abyssal.skin import hidpi                              # noqa: E402
 from abyssal.ui import console                              # noqa: E402
 from abyssal.ui.chrome import draw_background               # noqa: E402
 
 
 def frame(width: int, height: int, specimen: int = 0, seconds: float = 6.0,
-          tel: Telemetry | None = None, fps: float = 60.0) -> cairo.ImageSurface:
+          tel: Telemetry | None = None, fps: float = 60.0,
+          ds: float = 1.0) -> cairo.ImageSurface:
     sp = by_index(specimen)
     org = sp.build(seed=20260920 + specimen)
     phys = PhysiologyModel()
@@ -48,7 +50,12 @@ def frame(width: int, height: int, specimen: int = 0, seconds: float = 6.0,
     for _ in range(int(seconds / dt)):
         org.update(dt, phys.update(dt, tel))
 
-    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+    # `ds` reproduces the live HiDPI path: the target is allocated at DEVICE
+    # resolution and carries the device scale, and every draw below stays in
+    # LOGICAL coordinates - exactly what app.py does with the widget's scale.
+    hidpi.set_scale(ds)
+    console.clear_static_cache()
+    surf = hidpi.surface(width, height)
     cr = cairo.Context(surf)
     L = resolve(width, height)
     glass = console.stage_content(L)
@@ -100,10 +107,12 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=880)
     ap.add_argument("--specimen", type=int, default=0)
     ap.add_argument("--seconds", type=float, default=6.0)
+    ap.add_argument("--ds", type=float, default=1.0,
+                    help="device scale (HiDPI); the PNG comes out at w*ds x h*ds")
     a = ap.parse_args()
-    s = frame(a.width, a.height, a.specimen, a.seconds)
+    s = frame(a.width, a.height, a.specimen, a.seconds, ds=a.ds)
     s.write_to_png(a.out)
-    print(f"{a.out}  {a.width}x{a.height} specimen {a.specimen}")
+    print(f"{a.out}  {a.width}x{a.height} ds {a.ds} specimen {a.specimen}")
     return 0
 
 

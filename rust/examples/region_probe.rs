@@ -19,7 +19,7 @@ fn main() {
     for r in &regions {
         println!("  rect {:?}", r.rect);
         let path = format!("/tmp/region_{}_{}", r.rect.x as i32, r.rect.y as i32);
-        let mut surf = r.layer.surface.clone();
+        let surf = r.layer.surface.clone();
         let mut png = std::fs::File::create(format!("{path}.png")).unwrap();
         let _ = surf.write_to_png(&mut png);
         println!("  -> saved {path}.png ({}x{})", r.layer.surface.width(), r.layer.surface.height());

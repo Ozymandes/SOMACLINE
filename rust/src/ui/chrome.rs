@@ -141,8 +141,12 @@ fn weight_code(w: Weight) -> u8 {
 }
 
 fn size_key(size: f64) -> u32 {
-    // quantise to 1/4 px so nearby sizes share cache entries safely
-    (size * 4.0).round() as u32
+    // chrome.py keys _FD_CACHE / _CAP_CACHE on the EXACT size. The only thing
+    // the size reaches is `set_absolute_size(int(size * SCALE))`, so keying on
+    // that truncated value is equivalent and still shares entries. Quantising
+    // any coarser (e.g. to 1/4 px) hands back a font description built for a
+    // neighbouring size, which shifts glyph advances by a fraction of a pixel.
+    (size * SCALE) as u32
 }
 
 fn fd(size: f64, weight: Weight, family: &'static str) -> FontDescription {

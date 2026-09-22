@@ -199,3 +199,81 @@ fn fascia_bays_place_into_rects() {
     let r2 = p.bay("rail_2");
     assert!(r0.right() <= r1.x && r1.right() <= r2.x);
 }
+
+/// Which of the seven segments a glyph actually lights, read back off a
+/// render. `segment.rs` looks its geometry up as `geo[sid]`, so the geometry
+/// table has to stay in SEG_A..SEG_G order; when it drifted into Python's
+/// dict-insertion order every readout still measured correctly and still drew
+/// seven plausible segments, but "60" came out as "A2" and "13.5Gb" as
+/// "=5.9PH". Nothing about that is visible in a width check, so it is checked
+/// here by probing the segment centres of a real draw.
+fn lit_segments(ch: char, h: f64) -> Vec<usize> {
+    let st = segment::SegmentStyle {
+        slant: 0.0,      // no shear, so the probe points are the cell's own
+        ghost: 0.0,      // unlit segments must not register
+        bloom: 0.0,      // no halo bleeding into a neighbouring probe
+        ..segment::CYAN
+    };
+    let w = h * st.aspect;
+    let t = (h * st.thickness).max(1.0);
+    let surf = cairo::ImageSurface::create(cairo::Format::ARgb32,
+                                           (w + 4.0) as i32, (h + 4.0) as i32).unwrap();
+    {
+        let cr = cairo::Context::new(&surf).unwrap();
+        segment::draw(&cr, &ch.to_string(), 2.0, 2.0, h, &st);
+    }
+    let mut surf = surf;
+    let stride = surf.stride() as usize;
+    let data = surf.data().unwrap();
+    let at = |x: f64, y: f64| -> u8 {
+        let (xi, yi) = ((x + 2.0) as usize, (y + 2.0) as usize);
+        data[yi * stride + xi * 4 + 3] // alpha
+    };
+    // segment centres in the cell: a top, b/c right, d bottom, e/f left, g mid
+    let probes = [
+        (w * 0.5, t * 0.5),        // A
+        (w - t * 0.5, h * 0.27),   // B
+        (w - t * 0.5, h * 0.73),   // C
+        (w * 0.5, h - t * 0.5),    // D
+        (t * 0.5, h * 0.73),       // E
+        (t * 0.5, h * 0.27),       // F
+        (w * 0.5, h * 0.5),        // G
+    ];
+    probes
+        .iter()
+        .enumerate()
+        .filter(|(_, &(x, y))| at(x, y) > 128)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+#[test]
+fn segment_glyphs_light_the_python_segments() {
+    use abyssal::ui::segment::{SEG_A, SEG_B, SEG_C, SEG_D, SEG_E, SEG_F, SEG_G};
+    // ui/segment.py::GLYPHS, sorted. Digits plus the unit letters the rack
+    // actually spells (deg C, Gb, FPS) - the ones that were misrendering.
+    let expect: &[(char, &[usize])] = &[
+        ('0', &[SEG_A, SEG_B, SEG_C, SEG_D, SEG_E, SEG_F]),
+        ('1', &[SEG_B, SEG_C]),
+        ('2', &[SEG_A, SEG_B, SEG_D, SEG_E, SEG_G]),
+        ('3', &[SEG_A, SEG_B, SEG_C, SEG_D, SEG_G]),
+        ('4', &[SEG_B, SEG_C, SEG_F, SEG_G]),
+        ('5', &[SEG_A, SEG_C, SEG_D, SEG_F, SEG_G]),
+        ('6', &[SEG_A, SEG_C, SEG_D, SEG_E, SEG_F, SEG_G]),
+        ('7', &[SEG_A, SEG_B, SEG_C]),
+        ('8', &[SEG_A, SEG_B, SEG_C, SEG_D, SEG_E, SEG_F, SEG_G]),
+        ('9', &[SEG_A, SEG_B, SEG_C, SEG_D, SEG_F, SEG_G]),
+        ('-', &[SEG_G]),
+        ('_', &[SEG_D]),
+        ('C', &[SEG_A, SEG_D, SEG_E, SEG_F]),
+        ('F', &[SEG_A, SEG_E, SEG_F, SEG_G]),
+        ('G', &[SEG_A, SEG_C, SEG_D, SEG_E, SEG_F]),
+        ('P', &[SEG_A, SEG_B, SEG_E, SEG_F, SEG_G]),
+        ('S', &[SEG_A, SEG_C, SEG_D, SEG_F, SEG_G]),
+        ('b', &[SEG_C, SEG_D, SEG_E, SEG_F, SEG_G]),
+    ];
+    for &(ch, want) in expect {
+        let got = lit_segments(ch, 48.0);
+        assert_eq!(got, want.to_vec(), "glyph '{ch}': lit {got:?}, want {want:?}");
+    }
+}
