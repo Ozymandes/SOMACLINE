@@ -85,7 +85,7 @@ fn main() {
 
     if stage == "empty" {
         std::thread::sleep(std::time::Duration::from_secs(dwell));
-        report(stage, dwell);
+        report(&stage, dwell);
         return;
     }
 
