@@ -19,9 +19,13 @@ Two ramps, both from the console's own palette:
     density   deep-field blue where the cloud is thin, core cyan where the
               equation crowds - so the creature's internal structure comes
               from the maths rather than from a shading trick
-    warmth    the whole ramp shifts amber as thermal stress rises, which is
-              the one place the organism reports the machine's state in
-              colour rather than in shape
+    pulse     the propagating body pulse (mathforms.py) carries its own
+              colour, per point, through PULSE_PALETTE: abyssal blue at rest,
+              bio-green in healthy operation, amber -> orange under stress.
+              The field counts excitation and hue alongside density, so each
+              PIXEL takes the colour of the pulse passing through it and the
+              rest of the body stays cyan. The creature is never tinted as a
+              whole; only a faint thermal cast remains of the old global ramp.
 """
 
 from __future__ import annotations
@@ -49,6 +53,37 @@ _WASH_STEP = 6.0
 _WASH_LIMIT = 6
 _WASH: dict = {}
 _WASH_ORDER: list = []
+
+
+def _hex(h: str) -> tuple[float, float, float]:
+    return (int(h[0:2], 16) / 255.0, int(h[2:4], 16) / 255.0,
+            int(h[4:6], 16) / 255.0)
+
+
+#: The pulse palette, as (hue position, colour) stops. Blue -> green ->
+#: amber -> orange, deliberately without purple or red: a bioluminescent
+#: specimen, not a spectrum. mathforms.state_hue maps the system condition
+#: onto this axis.
+PULSE_PALETTE = (
+    (0.00, "4d9eff"),   # quiescent: electric abyssal blue
+    (0.16, "8ce0f8"),   # base: cold pale cyan
+    (0.34, "4cf0c8"),   # rousing: aqua
+    (0.50, "5cff8a"),   # healthy excitation: bioluminescent green
+    (0.64, "b4f25a"),   # high load: lime -> warm green
+    (0.80, "ffc445"),   # thermal stress: amber
+    (1.00, "ff7a1e"),   # high stress: orange
+)
+
+
+def _build_lut(n: int = 256) -> np.ndarray:
+    pos = np.array([p for p, _ in PULSE_PALETTE], dtype=np.float64)
+    rgb = np.array([_hex(c) for _, c in PULSE_PALETTE], dtype=np.float64)
+    q = np.linspace(0.0, 1.0, n)
+    return np.stack([np.interp(q, pos, rgb[:, c]) for c in range(3)],
+                    axis=1).astype(np.float32)
+
+
+PULSE_LUT = _build_lut()
 
 _CD_R, _CD_G, _CD_B = CYAN_DEEP
 _C_R, _C_G, _C_B = CYAN
@@ -132,7 +167,8 @@ def draw_organism(cr, vp: Viewport, org: SourceBody) -> None:
     half = np.float32(side * 0.5)
     px = wx * k + half
     py = wy * k + half
-    acc = PF.accumulate(ent, px, py, weight, org.persist)
+    exc, hue = org.excitation()
+    PF.accumulate_physio(ent, px, py, weight, exc, hue, org.persist)
 
     # Ink is scaled by how many BUFFER pixels one world unit covers: the same
     # cloud spread over four times the area must be counted four times as
@@ -154,12 +190,15 @@ def draw_organism(cr, vp: Viewport, org: SourceBody) -> None:
     if r > 0.0:
         ink *= (1.0 - r) ** 0.5 * 1.55
 
-    warm = org.warmth
+    # Only a faint thermal cast on the resting body: the stress colour is
+    # carried locally by the pulse, never by tinting the whole creature.
+    warm = org.warmth * 0.22
     lo = _mix(CYAN_DEEP, (0.34, 0.20, 0.06), warm)
     hi = _mix(CYAN, AMBER, warm)
     up = 1.0 / res
-    PF.paint(cr, ent, acc, vp.cx - side * 0.5 * up, vp.cy - side * 0.5 * up,
-             lo, hi, ink, scale_up=up)
+    PF.paint_physio(cr, ent, vp.cx - side * 0.5 * up,
+                    vp.cy - side * 0.5 * up, lo, hi, PULSE_LUT, ink,
+                    scale_up=up)
 
 
 def draw_calibration(cr, vp: Viewport, org: SourceBody) -> None:

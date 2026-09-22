@@ -49,3 +49,20 @@ class Physiology:
 
     # Always-present idle life, so the creature breathes with no load at all.
     vitality: float = 1.0
+
+    # ---- the system condition (see core/physiology.py) --------------------
+    # These drive the propagating body pulse. All default to ZERO, so a
+    # Physiology built from the five original drives alone - including the
+    # resting state the QA gates use - carries no condition at all.
+
+    #: Continuous system condition, 0..1. The ONE value the pulse colour is
+    #: read from: ~0 quiescent (abyssal blue), ~0.25-0.65 healthy (bio-green),
+    #: ~0.65-1 stressed (amber -> orange). Smoothed, rate-limited, hysteretic.
+    activity: float = 0.0
+    #: The stressed share of `activity`, 0..1 (smoothstep over its top third).
+    #: Species read it for their stress behaviours: desync, asymmetry, curl.
+    stress: float = 0.0
+    #: CPU excitation, 0..1, faster than `activity`: the pulse CADENCE.
+    excite: float = 0.0
+    #: Render pressure (frame-rate shortfall), 0..1: rhythmic irregularity.
+    tension: float = 0.0
