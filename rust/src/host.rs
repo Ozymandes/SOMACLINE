@@ -13,6 +13,8 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::Instant;
 
+use cairo::Context;
+
 use crate::layout::{self, Layout, LayoutState, Rect};
 use crate::lighting::LightField;
 use crate::physiology::PhysiologyModel;
@@ -20,8 +22,9 @@ use crate::render::RenderCaches;
 use crate::signals::Telemetry;
 use crate::species;
 use crate::telemetry::{History, TelemetrySource};
-use crate::ui::console::{self, CtlKind, ConsoleModel, Renderer};
-use crate::ui::debug::DebugInfo;
+use crate::render;
+use crate::ui::console::{self, CtlKind, ConsoleModel, Layer, Renderer};
+use crate::ui::debug::{self, DebugInfo};
 use crate::viewport::{self, Viewport};
 
 pub const APP_ID: &str = "dev.abyssal.OrganismMonitor";
@@ -564,5 +567,228 @@ impl Core {
         if let (Some(layout), Some(vp)) = (self.last_layout, self.last_vp) {
             self.log_probe(&layout, &vp, "sample");
         }
+    }
+}
+
+// =========================================================================
+// FRAME COMPOSITION (host-independent)
+// =========================================================================
+
+/// Blit one cached layer at a LOGICAL position.
+///
+/// The layer surface carries its own cairo device scale (the quantised cache
+/// scale), so cairo maps it back to logical size by itself and the caller
+/// works purely in logical coordinates - the same contract `examples/offscreen.rs`
+/// renders under, and the one whose loss malformed the GTK window once.
+///
+/// `pad` clamps the source at its edge. A full-window layer needs it whenever
+/// the target's device scale differs from the cache scale (fractional
+/// scaling), because the bilinear resample would otherwise sample past the
+/// last row and column and leave a transparent seam - GSK's texture sampler
+/// clamps for the same reason. A *region* must NOT pad: it is blitted with an
+/// unbounded `paint()`, and padding would smear the patch across the window.
+fn paint_layer(cr: &Context, layer: Option<&Layer>, x: f64, y: f64, pad: bool) {
+    let Some(layer) = layer else { return };
+    if cr.set_source_surface(&layer.surface, x, y).is_err() {
+        return;
+    }
+    if pad {
+        cr.source().set_extend(cairo::Extend::Pad);
+    }
+    let _ = cr.paint();
+}
+
+impl Core {
+    /// Compose one whole frame into `cr`, in LOGICAL coordinates.
+    ///
+    /// The caller has already set `skin::hidpi::set_scale()` and given the
+    /// target its device scale; this function is the same four-layer sequence
+    /// the GTK host feeds to GSK, drawn with cairo instead.
+    ///
+    /// `width`/`height` are LOGICAL. `report_ds` is the scale the debug
+    /// overlay should print (the window's real scale factor).
+    pub fn compose_frame(&mut self, cr: &Context, width: f64, height: f64, report_ds: f64) {
+        if width < 1.0 || height < 1.0 {
+            return;
+        }
+        let t0 = Instant::now();
+        let (layout, glass, vp) = self.frame_geometry(width, height);
+
+        // Scrub the buffer to OPAQUE black. Two jobs: a presentation buffer
+        // comes back with undefined contents (it may be a different one each
+        // frame), and the frame must end fully opaque because softbuffer
+        // discards the alpha byte - a premultiplied pixel with a < 255 would
+        // otherwise present darkened.
+        let _ = cr.save();
+        cr.set_operator(cairo::Operator::Source);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        let _ = cr.paint();
+        let _ = cr.restore();
+
+        // LAYERS 0-1: background, shell, glass, graticule (static)
+        let under = self.renderer.layer_under(&layout, &self.model);
+        // LAYER 3: the structural modules and static type (static)
+        let over = self
+            .renderer
+            .layer_over(&layout, &self.model, &self.telemetry);
+
+        paint_layer(cr, under.as_ref(), 0.0, 0.0, true);
+
+        // LAYER 2: the organism - the only per-frame raster, glass only
+        if glass.valid() {
+            let _ = cr.save();
+            cr.rectangle(glass.x, glass.y, glass.w, glass.h);
+            cr.clip();
+            let Core {
+                organisms,
+                species_index,
+                rcaches,
+                show_calibration,
+                ..
+            } = self;
+            let org = organisms[*species_index].as_ref().unwrap();
+            render::draw_organism(cr, &vp, org, rcaches);
+            if *show_calibration {
+                render::draw_calibration(cr, &vp, org);
+            }
+            let _ = cr.restore();
+        }
+
+        paint_layer(cr, over.as_ref(), 0.0, 0.0, true);
+
+        // LAYERS 4-6: live regions, each re-rendered only on its own change
+        let regions = self.renderer.regions(
+            &layout,
+            &self.model,
+            &self.telemetry,
+            self.fps,
+            self.frame_ms,
+            under.as_ref(),
+            over.as_ref(),
+        );
+        for reg in &regions {
+            if !reg.rect.valid() {
+                continue;
+            }
+            paint_layer(cr, Some(&reg.layer), reg.rect.x, reg.rect.y, false);
+        }
+
+        self.draw_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        self.draw_acc += self.draw_ms;
+        if self.show_debug {
+            let info = self.debug_info(&layout, report_ds);
+            debug::draw_debug(cr, &layout, &vp, &info);
+        }
+        self.frames += 1;
+        self.tick_fps();
+        self.last_layout = Some(layout);
+        self.last_vp = Some(vp);
+    }
+}
+
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+    use crate::skin::hidpi;
+
+    /// Build a `Layer` whose surface is a `w x h` LOGICAL block of solid
+    /// colour rendered at cache scale `cache_ds`, with a marker in the very
+    /// last logical pixel of each corner.
+    fn probe_layer(cache_ds: f64, w: f64, h: f64) -> Layer {
+        hidpi::set_scale(cache_ds);
+        let surf = hidpi::surface(w, h);
+        {
+            let cr = Context::new(&surf).unwrap();
+            cr.set_source_rgb(0.15, 0.35, 0.55);
+            cr.paint().unwrap();
+            cr.set_source_rgb(1.0, 0.0, 0.0);
+            for (cx, cy) in [(0.0, 0.0), (w - 2.0, 0.0), (0.0, h - 2.0), (w - 2.0, h - 2.0)] {
+                cr.rectangle(cx, cy, 2.0, 2.0);
+                cr.fill().unwrap();
+            }
+        }
+        surf.flush();
+        Layer { id: 1, surface: surf }
+    }
+
+    fn target(phys_w: i32, phys_h: i32, ds_x: f64, ds_y: f64) -> cairo::ImageSurface {
+        let s = cairo::ImageSurface::create(cairo::Format::ARgb32, phys_w, phys_h).unwrap();
+        s.set_device_scale(ds_x, ds_y);
+        s
+    }
+
+    fn px(s: &mut cairo::ImageSurface, x: i32, y: i32) -> (u8, u8, u8, u8) {
+        s.flush();
+        let stride = s.stride() as usize;
+        let d = s.data().unwrap();
+        let o = y as usize * stride + x as usize * 4;
+        (d[o + 2], d[o + 1], d[o], d[o + 3]) // r, g, b, a
+    }
+
+    /// A full-window layer must cover EVERY device pixel of the target, at
+    /// every combination of cache scale and target scale - most of all the
+    /// fractional one, where the cache is rendered at 1.5 and the window is
+    /// 1.6, and the bilinear resample would otherwise leave a transparent
+    /// seam along the last row and column.
+    ///
+    /// This is the gate for the bug class that malformed the GTK window: it
+    /// cannot fail at ds 1.0, so it is driven at the scales that can.
+    #[test]
+    fn a_padded_layer_fills_the_whole_target_at_every_scale() {
+        // (cache scale, target scale) - equal, upscaling, and downscaling
+        for (cache_ds, win_ds) in [
+            (1.0, 1.0),
+            (1.5, 1.5),
+            (2.0, 2.0),
+            (1.5, 1.6),   // Hyprland fractional: quantised cache, real window
+            (1.5, 1.0),
+            (1.0, 2.0),
+        ] {
+            let (lw, lh) = (120.0_f64, 80.0_f64);
+            let layer = probe_layer(cache_ds, lw, lh);
+            let (pw, ph) = ((lw * win_ds) as i32, (lh * win_ds) as i32);
+            let mut tgt = target(pw, ph, pw as f64 / lw, ph as f64 / lh);
+            {
+                let cr = Context::new(&tgt).unwrap();
+                paint_layer(&cr, Some(&layer), 0.0, 0.0, true);
+            }
+            let tag = format!("cache {cache_ds} -> window {win_ds}");
+            // corners: the marker must reach the outermost device pixel
+            for (x, y) in [(0, 0), (pw - 1, 0), (0, ph - 1), (pw - 1, ph - 1)] {
+                let (r, g, b, a) = px(&mut tgt, x, y);
+                assert!(a > 250, "{tag}: device pixel {x},{y} is transparent (a={a}) - the layer did not reach the edge");
+                assert!(r > 150 && g < 90 && b < 90,
+                        "{tag}: device pixel {x},{y} is {r},{g},{b} - expected the corner marker");
+            }
+            // centre: the body colour, i.e. the layer is not shrunk into a
+            // corner (the exact failure of the texture-copy regression)
+            let (r, g, b, a) = px(&mut tgt, pw / 2, ph / 2);
+            assert!(a > 250 && b > r && b > 100,
+                    "{tag}: centre is {r},{g},{b},{a} - expected the layer body");
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// A region must NOT pad: it is blitted with an unbounded `paint()`, so
+    /// padding would smear the patch across the whole window.
+    #[test]
+    fn an_unpadded_region_stays_inside_its_rect() {
+        for win_ds in [1.0_f64, 1.5, 1.6] {
+            let layer = probe_layer(1.5, 20.0, 12.0);
+            let (lw, lh) = (120.0_f64, 80.0_f64);
+            let (pw, ph) = ((lw * win_ds) as i32, (lh * win_ds) as i32);
+            let mut tgt = target(pw, ph, pw as f64 / lw, ph as f64 / lh);
+            {
+                let cr = Context::new(&tgt).unwrap();
+                paint_layer(&cr, Some(&layer), 40.0, 30.0, false);
+            }
+            // inside the patch
+            let (_, _, _, a_in) = px(&mut tgt, (50.0 * win_ds) as i32, (36.0 * win_ds) as i32);
+            assert!(a_in > 250, "ds {win_ds}: region did not land at its rect");
+            // outside it: untouched
+            let (_, _, _, a_out) = px(&mut tgt, (5.0 * win_ds) as i32, (5.0 * win_ds) as i32);
+            assert_eq!(a_out, 0, "ds {win_ds}: region smeared outside its rect");
+        }
+        hidpi::set_scale(1.0);
     }
 }

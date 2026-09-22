@@ -7,10 +7,16 @@
 //!   sources, mathforms, species, pointfield, render <- organism/*
 //!   skin/*                   <- skin/*
 //!   ui/*                     <- ui/*
-//!   app                      <- app.py (the GTK host)
+//!   host                     <- app.py, minus the toolkit (the machine)
+//!   app                      <- app.py's GTK adaptation (reference host)
+//!   present, winit_host      <- the winit + softbuffer host
 
+#[cfg(feature = "gtk-host")]
 pub mod app;
 pub mod host;
+pub mod present;
+#[cfg(feature = "winit-host")]
+pub mod winit_host;
 pub mod layout;
 pub mod lighting;
 pub mod mathforms;
