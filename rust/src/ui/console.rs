@@ -41,21 +41,31 @@ pub struct Region {
 pub struct ConsoleModel {
     pub species: &'static Species,
     pub active: usize,
-    pub history: Rc<RefCell<History>>,
-    pub diag: bool,
+    pub pressed: Option<usize>,
+    pub focus: Option<usize>,
     /// "inactive" | "armed" | "active" | "error"
     pub mode_state: String,
-    pub focus: Option<usize>,
-    pub pressed: Option<usize>,
+    /// "neutral" | press animation state of the cycle rocker
+    pub cycle_state: String,
+    /// Specimen indices whose keys render disabled.
+    pub disabled: Vec<usize>,
     pub switches: usize,
-    // live observation-field values (refreshed by the host each frame)
-    pub phase: f64,
-    pub rotation: f64,
+    /// 60 s of telemetry at the telemetry cadence, owned by the host. The
+    /// graphs read it; nothing in the draw path writes to it.
+    pub history: Rc<RefCell<History>>,
+    // Live observation-field values. Set by the host each frame; every one of
+    // these is rendered in code, never baked into the glass.
+    pub phase: f64,           // radians
+    pub rotation: f64,        // rpm
+    pub coords: (f64, f64, f64),
     pub behavior: String,
-    pub flux: f64,
-    pub surge: f64,
     pub magnification: f64,
     pub field_mm: f64,
+    pub aperture: String,
+    pub flux: f64,
+    pub surge: f64,
+    /// Diagnostics overlay (F1).
+    pub diag: bool,
 }
 
 impl ConsoleModel {
@@ -68,19 +78,23 @@ impl ConsoleModel {
         ConsoleModel {
             species,
             active,
-            history,
-            diag,
-            mode_state: "inactive".to_string(),
-            focus: None,
             pressed: None,
+            focus: None,
+            mode_state: "armed".to_string(),
+            cycle_state: "neutral".to_string(),
+            disabled: Vec::new(),
             switches: 0,
+            history,
             phase: 0.0,
-            rotation: 0.08,
+            rotation: 0.0,
+            coords: (0.0, 0.0, 0.0),
             behavior: "STABLE".to_string(),
+            magnification: 4.0,
+            field_mm: 2.50,
+            aperture: "f/1.8".to_string(),
             flux: 0.0,
             surge: 0.0,
-            magnification: 0.1,
-            field_mm: 0.01,
+            diag,
         }
     }
 }
