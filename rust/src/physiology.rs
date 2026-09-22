@@ -10,8 +10,10 @@
 //! full at 93C; memory only the last 20%; io the smoothed flux; render the
 //! frame-rate shortfall), then
 //!
+//! ```text
 //!     base     = 0.70 cpu + 0.10 memory + 0.10 io + 0.10 render
 //!     activity = base + (1 - base) * 0.92 * thermal_stress
+//! ```
 //!
 //! No hard thresholds anywhere: the target passes a small hysteresis deadband,
 //! then an asymmetric EMA (rouse ~1.4 s, calm ~3.2 s), then a rate limit.

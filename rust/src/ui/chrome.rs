@@ -4,8 +4,10 @@
 //! Immediate-mode Cairo + PangoCairo. Two entry points, both safe to call
 //! every frame:
 //!
+//! ```text
 //!     draw_background(cr, w, h)
 //!     draw_chrome(cr, layout, tel, fps, frame_ms)
+//! ```
 //!
 //! Design rules enforced here: hairlines and type only; nothing is ever
 //! drawn outside the Rect it belongs to; degenerate rects draw nothing; all

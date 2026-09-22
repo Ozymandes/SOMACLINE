@@ -7,25 +7,37 @@
 //!
 //! THE PERTURBATION RULE: the equation is never edited. Telemetry acts on the
 //! solved point cloud, and only in ways the creature could plausibly do to
-//! itself. Every specimen reduces to its published form when physiology is at
-//! rest (except colour, which pulses subtly even at rest).
+//! itself: a ripple along its own body, a breath about its own centre, a band
+//! of excitation travelling through it, a fraction of itself expressed or
+//! withheld. Every specimen still reduces to its published form when
+//! physiology is at rest — the resting creature is the published equation to
+//! the last bit. Colour pulses even at rest, subtly.
 //!
 //! THE PROPAGATING PULSE: each sample carries a stable body coordinate `u`
-//! in 0..1 derived once from the equation's own organisation, plus a periphery
-//! (`lat`) and a part (`grp`). A wave phase is integrated in real seconds and
-//! each point reads a leading edge, a trailing glow and a small afterpulse.
-//! `f` drives excitation; hue is read off the system condition and warms along
+//! in 0..1 derived once from the equation's own organisation, plus, where the
+//! anatomy has them, a periphery (`lat`) and a part (`grp`). A wave phase is
+//! integrated in real seconds (never `speed * t`, so a change of speed cannot
+//! jump the front) and each point reads
+//!
+//! ```text
+//!     s = frac(wave - lambda * u - species offsets)      time since the front
+//!     f = lead(s) * (exp(-s / 0.10) + 0.30 * afterpulse(s))
+//! ```
+//!
+//! `f` drives EXCITATION; HUE is read off the system condition, warming along
 //! the trail under stress.
 //!
 //! NUMERICS: point math runs in f32 exactly like the NumPy original (f64
-//! scalars cast at the point of use, numpy weak-scalar semantics); the
-//! integrators (time, wave, aux, jit) stay f64 exactly as in Python.
+//! scalars cast at the point of use, numpy weak-scalar semantics, numpy's
+//! floor `%` mapped to `rem_euclid`); the integrators (time, wave, aux, jit)
+//! stay f64 exactly as in Python.
 
 use crate::signals::Physiology;
-use crate::sources::{by_key, c01, c02, c03, c04, c05, SourceDef};
+use crate::sources::{by_key, c01, c02, c03, c04, c05, SourceDef, WORLD_FIT};
 use crate::world::WORLD_RADIUS;
 
-/// The originals run at 60 frames a second.
+/// The originals run at 60 frames a second. Advancing each source's own dt at
+/// that rate is what makes the creature move at the speed it was authored for.
 pub const SOURCE_FPS: f64 = 60.0;
 
 /// Smallest fraction of its own point set a specimen will express.
@@ -34,18 +46,20 @@ pub const MIN_EXPRESSION: f64 = 0.42;
 /// Hard ceiling. Nothing may reach the bezel whatever the telemetry does.
 pub const R_SAFE: f64 = WORLD_RADIUS - 6.0;
 
-/// Pulse shape, as a share of one cycle.
+/// Pulse shape, as a share of one cycle: leading-edge rise, trailing decay,
+/// and the afterpulse's position, width and strength.
 pub const PULSE_LEAD: f64 = 0.035;
 pub const PULSE_TRAIL: f64 = 0.10;
 pub const AFTER_AT: f64 = 0.26;
 pub const AFTER_W: f64 = 0.045;
 pub const AFTER_K: f64 = 0.30;
 
-/// System condition -> pulse hue (0 electric blue .. 1 orange).
+/// System condition -> pulse hue (0 electric blue .. 1 orange); see render.rs
+/// for the palette itself. Piecewise-linear, so it has no thresholds to snap.
 const HUE_ACT: [f64; 6] = [0.00, 0.22, 0.45, 0.65, 0.82, 1.00];
 const HUE_VAL: [f64; 6] = [0.05, 0.30, 0.50, 0.64, 0.80, 0.97];
 
-/// The pulse hue the system condition asks for, 0..1. Piecewise-linear.
+/// The pulse hue the system condition asks for, 0..1.
 pub fn state_hue(activity: f64) -> f64 {
     let a = activity.clamp(0.0, 1.0);
     for j in 1..HUE_ACT.len() {
@@ -81,7 +95,8 @@ pub enum SpeciesKind {
 }
 
 impl SpeciesKind {
-    /// Pulse cadence at rest, in body traversals per second.
+    /// Pulse cadence at rest, in body traversals per second. CPU excitation
+    /// multiplies it by up to 1 + PULSE_GAIN.
     fn pulse_hz(self) -> f64 {
         match self {
             SpeciesKind::SigmoidPlume => 0.20,
@@ -101,14 +116,21 @@ impl SpeciesKind {
     }
 }
 
+const PULSE_GAIN: f64 = 1.8;
+
 /// One specimen. Solves its equation each frame into world coordinates.
 pub struct SourceBody {
     kind: SpeciesKind,
     src: &'static SourceDef,
-    pub time: f64,
+    time: f64,
+    #[allow(dead_code)]
     seed: u64,
+    #[allow(dead_code)]
     core_r: f64,
 
+    /// A fixed permutation of the original loop's indices. Expressing a
+    /// fraction of the body means taking a PREFIX of this - a uniform
+    /// thinning of the whole creature.
     perm: Vec<f32>,
     mod2: Vec<f32>,
     mod4: Vec<f32>,
@@ -140,8 +162,6 @@ pub struct SourceBody {
     dt: f64,
 }
 
-const PULSE_GAIN: f64 = 1.8;
-
 /// The f32 permutation of the original loop's indices, dumped once from the
 /// Python oracle so a fraction of the body means the SAME uniform thinning
 /// in both implementations. mod2/mod4 derive from it exactly as in Python.
@@ -160,13 +180,16 @@ fn load_perm(key: &str) -> Vec<f32> {
         .collect()
 }
 
-/// (u, lat, grp) over the ORIGINAL loop index, in f64, then cast f32.
+/// (u, lat, grp) over the ORIGINAL loop index, f64 math, cast to f32.
 fn anatomy(kind: SpeciesKind, n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let i: Vec<f64> = (0..n).map(|k| k as f64).collect();
     let zeros = || vec![0.0f32; n];
     match kind {
         SpeciesKind::SigmoidPlume => {
-            // d = mag(k, e) is static per index and runs root -> tail.
+            // The equation's own d = mag(k, e) is static per index and runs
+            // monotonically root -> tail, so it IS the spine coordinate.
+            // |k| = |4 cos(x/21)| is how far a sample sits out on its
+            // filament: the plume's periphery.
             let k: Vec<f64> = i.iter().map(|&x| 4.0 * (x / 21.0).cos()).collect();
             let e: Vec<f64> = i.iter().map(|&x| (x / 235.0) / 8.0 - 20.0).collect();
             let d: Vec<f64> = k.iter().zip(&e).map(|(&a, &b)| a.hypot(b)).collect();
@@ -175,7 +198,8 @@ fn anatomy(kind: SpeciesKind, n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
             (u, lat, zeros())
         }
         SpeciesKind::CoupledBodies => {
-            // m = i%2*9 is the body; d = mag(k, e)/4 runs along each spiral.
+            // m = i%2*9 is the body; d = mag(k, e)/4 runs from each body's
+            // core out along its spiral; |k| is the lateral fringe.
             let k: Vec<f64> = i.iter().map(|&x| 9.0 * (x / 81.0).cos()).collect();
             let e: Vec<f64> = i.iter().map(|&x| x / 765.0 - 13.0).collect();
             let d: Vec<f64> = k.iter().zip(&e).map(|(&a, &b)| a.hypot(b) / 4.0).collect();
@@ -185,12 +209,16 @@ fn anatomy(kind: SpeciesKind, n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
             (u, lat, grp)
         }
         SpeciesKind::MirroredAlien => {
-            // 200x200 grid; the mirror plane is k = 0.
+            // 200x200 grid; o = mag(k,e)/12... is the radial anatomy; the
+            // mirror plane is k = 0, so sign(k) is the side.
             let k: Vec<f64> = i.iter().map(|&x| (x % 200.0) / 8.0 - 12.5).collect();
             let e: Vec<f64> = i.iter().map(|&x| (x / 200.0) / 8.0 - 12.5).collect();
             let d: Vec<f64> = k.iter().zip(&e).map(|(&a, &b)| a.hypot(b)).collect();
             let u = norm(&d);
-            let grp: Vec<f32> = k.iter().map(|&v| if v > 0.0 { 1.0f32 } else { 0.0f32 }).collect();
+            let grp: Vec<f32> = k
+                .iter()
+                .map(|&v| if v > 0.0 { 1.0f32 } else { 0.0f32 })
+                .collect();
             (u, zeros(), grp)
         }
         SpeciesKind::QuadPlume => {
@@ -201,7 +229,8 @@ fn anatomy(kind: SpeciesKind, n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
             (u, zeros(), grp)
         }
         SpeciesKind::SingleFeather => {
-            // d = mag(k,e)**2/59 + 4 grows from the base to the extremity.
+            // d = mag(k,e)**2/59 + 4 grows from the base to the extremity;
+            // |cos(x/14)| is how far out along its rib a sample sits.
             let k: Vec<f64> = i
                 .iter()
                 .map(|&x| 5.0 * ((x % 200.0) / 14.0).cos() * ((x / 43.0) / 30.0).cos())
@@ -210,12 +239,15 @@ fn anatomy(kind: SpeciesKind, n: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
             let d: Vec<f64> = k
                 .iter()
                 .zip(&e)
-                .map(|(&a, &b)| a.hypot(b) * a.hypot(b) / 59.0 + 4.0)
+                .map(|(&a, &b)| {
+                    let h = a.hypot(b);
+                    h * h / 59.0 + 4.0
+                })
                 .collect();
             let u = norm(&d);
             let lat: Vec<f32> = i
                 .iter()
-                .map(|&x| (((x % 200.0) / 14.0).cos().abs()) as f32)
+                .map(|&x| ((x % 200.0) / 14.0).cos().abs() as f32)
                 .collect();
             (u, lat, zeros())
         }
@@ -228,8 +260,14 @@ fn burst(z: f64) -> f64 {
     (-z / 0.30).exp() * (1.0 - (-(1.0 - z) / 0.05).exp())
 }
 
+/// Construct a specimen by source key (`s01`..`s05`). Module-level, like the
+/// Python `mathforms.build`.
+pub fn build(key: &str, seed: u64) -> SourceBody {
+    SourceBody::build(key, seed)
+}
+
 impl SourceBody {
-    pub fn build(key: &str, _seed: u64) -> SourceBody {
+    pub fn build(key: &str, seed: u64) -> SourceBody {
         let src = by_key(key).unwrap_or_else(|| panic!("unknown species key: {key}"));
         let kind = match key {
             "s01" => SpeciesKind::SigmoidPlume,
@@ -258,7 +296,7 @@ impl SourceBody {
             kind,
             src,
             time: 0.0,
-            seed: _seed,
+            seed,
             core_r: 0.0,
             perm,
             mod2,
@@ -300,9 +338,11 @@ impl SourceBody {
         self.warm
     }
 
-    /// Retention for THIS frame. Memory pressure lengthens the trail; the
-    /// retention is raised to the frame's own duration so the trail's length
-    /// stays constant in SECONDS.
+    /// Retention for THIS frame. Memory pressure lengthens the trail.
+    ///
+    /// The source's retention is per frame at 60 frames a second. Raising it
+    /// to the frame's own duration keeps the trail's length constant in
+    /// SECONDS, which is the thing the eye actually sees.
     pub fn persist(&self) -> f64 {
         if self.src.persist <= 0.0 {
             return 0.0;
@@ -327,6 +367,13 @@ impl SourceBody {
         (&self.e[..self.live], &self.h[..self.live])
     }
 
+    /// (u, lat, grp) per point, permuted order, aligned with points().
+    /// The stable body coordinates the pulse reads.
+    #[inline]
+    pub fn anatomy(&self) -> (&[f32], &[f32], &[f32]) {
+        (&self.u[..], &self.lat[..], &self.grp[..])
+    }
+
     #[inline]
     pub fn time(&self) -> f64 {
         self.time
@@ -338,7 +385,8 @@ impl SourceBody {
     }
 
     /// Farthest VISIBLE point from the world origin, in world units.
-    /// Weighted: a zero-intensity sample is not on screen and cannot clip.
+    /// Weighted: a sample carrying zero intensity is not on screen and cannot
+    /// clip. (Python computes the hypot in f32, then takes the max.)
     pub fn max_extent(&self) -> f64 {
         let n = self.live;
         let mut m = 0.0f32;
@@ -353,17 +401,20 @@ impl SourceBody {
         m as f64
     }
 
-    /// Advance the source clock and re-solve. Allocation-free.
+    /// Advance the source clock and re-solve. Allocation-free in the sense
+    /// Python is (the per-species perturbations use small scratch vectors).
     pub fn update(&mut self, dt: f64, p: &Physiology) {
         // CPU raises the phase rate, but only within a band: this is the one
-        // place a global speed-up is legitimate.
+        // place a global speed-up is legitimate, because the sources are
+        // themselves phase animations.
         let rate = 1.0 + 0.5 * p.agitation;
         self.time += dt * SOURCE_FPS * self.src.dt * rate;
         if dt > 0.0 {
             self.dt = dt;
         }
         // The pulse clock. Integrated, so a change of cadence bends the
-        // front's speed instead of teleporting it.
+        // front's speed instead of teleporting it. Render pressure and stress
+        // add a bounded wobble to the rhythm - irregular, never random.
         self.jit += dt * 2.3;
         let wobble = 0.30 * f64::max(p.tension, 0.6 * p.stress) * self.jit.sin();
         self.wave += dt * self.kind.pulse_hz() * (1.0 + PULSE_GAIN * p.excite) * (1.0 + wobble);
@@ -377,7 +428,7 @@ impl SourceBody {
         let kind = self.kind;
         let time = self.time;
 
-        // 1. solve the equation into (x, y, w) — permuted index order.
+        // 1. solve the equation into (x, y, w), in permuted index order.
         {
             let SourceBody { perm, x, y, w, .. } = self;
             let idx = &perm[..nl];
@@ -408,23 +459,19 @@ impl SourceBody {
         // 2. the propagating pulse: excitation + hue per point.
         let (hue, amp) = {
             let SourceBody { kind, u, lat, grp, s, f, e, h, t1, .. } = self;
-            run_pulse(
-                kind, nl, p, self.wave, self.aux, u, lat, grp, s, f, e, h, t1,
-            )
+            run_pulse(kind, nl, p, self.wave, self.aux, u, lat, grp, s, f, e, h, t1)
         };
         self.hue = hue;
         self.amp = amp;
 
         // 3. small, species-specific perturbation (source coordinates).
         {
-            let SourceBody { kind, lat, grp, u, mod2, mod4, t1, x, y, w, .. } = self;
-            run_perturb(
-                kind, nl, p, time, self.aux, x, y, w, lat, grp, u, mod2, mod4, t1,
-            );
+            let SourceBody { kind, f, lat, grp, u, mod2, mod4, t1, x, y, w, .. } = self;
+            run_perturb(kind, nl, p, time, self.aux, f, x, y, w, lat, grp, u, mod2, mod4, t1);
         }
 
-        // 4. seat: translate to the creature's own frame centre, scale once.
-        let seat_k = (crate::sources::WORLD_FIT / self.src.frame_half) as f32;
+        // 4. Seat: translate to the creature's own frame centre, scale once.
+        let seat_k = (WORLD_FIT / self.src.frame_half) as f32;
         let cx = self.src.frame_cx as f32;
         let cy = self.src.frame_cy as f32;
         let r_safe = R_SAFE as f32;
@@ -436,9 +483,13 @@ impl SourceBody {
             yb[k] = (yb[k] - cy) * seat_k;
         }
         // 5. A sample outside the design radius is made INVISIBLE, not
-        // clamped onto it. Non-finite samples get zero weight, never dropped.
+        // clamped onto it. The coordinate is still pulled in so the body's
+        // reported extent stays bounded. A non-finite sample is given zero
+        // weight rather than dropped, so the point count stays a fixed shape.
         for k in 0..nl {
-            let (mut xv, mut yv, mut wv) = (xb[k], yb[k], wb[k]);
+            let mut xv = xb[k];
+            let mut yv = yb[k];
+            let mut wv = wb[k];
             let mut r = xv.hypot(yv);
             r = r.max(1e-9f32);
             if !(r <= r_safe) {
@@ -462,14 +513,14 @@ impl SourceBody {
     fn advance_aux(&mut self, dt: f64, p: &Physiology) {
         let sdt = dt * SOURCE_FPS * self.src.dt;
         self.aux += match self.kind {
-            // ciliary ripple, at the rate it was authored for (3.1 / unit t)
+            // ciliary ripple phase, at the rate the ripple was authored for
             SpeciesKind::SigmoidPlume => sdt * 3.1 * (1.0 + 0.9 * p.excite),
             // the argument's own slow clock
             SpeciesKind::CoupledBodies => dt * 0.9,
             SpeciesKind::MirroredAlien => dt * 0.7,
             // one full round of the four plumes; CPU raises the chase rate
             SpeciesKind::QuadPlume => dt * 0.22 * (1.0 + 2.0 * p.excite),
-            // rib-wave phase at the whip's authored rate (2.7 / unit t)
+            // rib-wave phase, at the whip's authored rate (2.7 / unit t)
             SpeciesKind::SingleFeather => sdt * 2.7 * (1.0 + 0.6 * p.excite),
         };
     }
@@ -485,7 +536,7 @@ fn phase_base(kind: SpeciesKind, n: usize, wave: f64, u: &[f32], s: &mut [f32]) 
     }
 }
 
-/// Fill excitation and hue for the first `n` points.
+/// Fill excitation and hue for the first `n` points. Returns (hue, amp).
 #[allow(clippy::too_many_arguments)]
 fn run_pulse(
     kind: &SpeciesKind,
@@ -521,7 +572,8 @@ fn run_pulse(
         }
         SpeciesKind::CoupledBodies => {
             // The second body fires half a cycle after the first; stress
-            // pushes the pair out of step - a bounded argument.
+            // pushes the pair out of step - a bounded argument that settles
+            // back as the stress does.
             let lag = 0.5 + 0.22 * p.stress * aux.sin();
             let lag32 = lag as f32;
             for k in 0..n {
@@ -547,7 +599,7 @@ fn run_pulse(
         }
     }
 
-    // floor modulo into 0..1
+    // np.mod(s, 1.0): floor modulo into 0..1
     for k in 0..n {
         sb[k] = sb[k].rem_euclid(1.0f32);
     }
@@ -567,7 +619,7 @@ fn run_pulse(
         let mut fv = (sv * trail_k).exp() * tv;
         // afterpulse
         let mut av = sv - AFTER_AT as f32;
-        av = av * after_k;
+        av *= after_k;
         av = -av * av;
         av = av.exp();
         fv += after_amp * av;
@@ -575,20 +627,21 @@ fn run_pulse(
         t1b[k] = av;
     }
 
-    // species modulation of the envelope (quad plume chase)
+    // Species modulation of the pulse envelope: the quad plume's chase.
+    // Each plume fires in turn; stress pulls the four stations together.
     if *kind == SpeciesKind::QuadPlume {
         let sync = 0.85 * smoothstep(0.35, 1.0, p.stress);
         let mut env = [0.0f32; 4];
         for (l, env_l) in env.iter_mut().enumerate() {
             let v = 0.22
                 + 0.78 * burst(aux - l as f64 * 0.25 * (1.0 - sync))
-                + 0.8 * p.surge * burst(aux - (((l + 2) % 4) as f64) * 0.25);
+                + 0.8 * p.surge * burst(aux - ((l + 2) % 4) as f64 * 0.25);
             *env_l = v as f32;
         }
         for k in 0..n {
             let gain = env[grp[k] as usize];
             fb[k] *= gain;
-            t1b[k] = gain; // keep the per-point gain for the swell
+            t1b[k] = gain; // keep the per-point gain for the tint
         }
     }
 
@@ -602,7 +655,8 @@ fn run_pulse(
     for k in 0..n {
         e[k] = fb[k] * amp32;
     }
-    // Hue: the condition's hue at the leading edge, warming along the trail.
+    // Hue: the condition's hue at the leading edge, warming along the trail
+    // as stress rises - so a stressed pulse drags an amber wake.
     let hue = state_hue(p.activity);
     let hue32 = hue as f32;
     let stress_hue = (0.16 * p.stress) as f32;
@@ -614,7 +668,7 @@ fn run_pulse(
     match kind {
         SpeciesKind::SigmoidPlume => {
             if p.stress > 0.0 {
-                // heat reaches the central spine before the filaments
+                // heat reaches the central spine before the peripheral filaments
                 let a = (0.10 * p.stress) as f32;
                 let b = (0.16 * p.stress) as f32;
                 for k in 0..n {
@@ -636,9 +690,8 @@ fn run_pulse(
             if p.stress > 0.0 {
                 // the leading side warms first
                 let a = (0.09 * p.stress) as f32;
-                let b = a;
                 for k in 0..n {
-                    h[k] += a - b * grp[k];
+                    h[k] += a - a * grp[k];
                 }
             }
         }
@@ -654,9 +707,8 @@ fn run_pulse(
             if p.stress > 0.0 {
                 // the base warms first; the signal carries it out to the tip
                 let a = (0.10 * p.stress) as f32;
-                let b = a;
                 for k in 0..n {
-                    h[k] += a - b * u[k];
+                    h[k] += a - a * u[k];
                 }
             }
         }
@@ -668,8 +720,8 @@ fn run_pulse(
 }
 
 /// The wavefront swell: a local radial bulge riding the pulse, in SOURCE
-/// coordinates. Zero at rest by construction except for the small rest
-/// agitation share, exactly as Python.
+/// coordinates about the creature's own frame centre. Reads the final pulse
+/// envelope `f`, exactly like Python's `_swell`.
 #[allow(clippy::too_many_arguments)]
 fn swell(
     n: usize,
@@ -679,7 +731,6 @@ fn swell(
     y: &mut [f32],
     cx: f32,
     cy: f32,
-    gain: Option<&[f32]>,
 ) {
     let k = 0.030 * p.agitation + 0.035 * p.stress;
     if k <= 0.0 {
@@ -687,15 +738,13 @@ fn swell(
     }
     let k32 = k as f32;
     for idx in 0..n {
-        let mut g = f[idx] * k32;
-        if let Some(gn) = gain {
-            g *= gn[idx];
-        }
+        let g = f[idx] * k32;
         x[idx] = (x[idx] - cx) * (1.0f32 + g) + cx;
         y[idx] = (y[idx] - cy) * (1.0f32 + g) + cy;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn run_perturb(
     kind: &SpeciesKind,
@@ -703,23 +752,25 @@ fn run_perturb(
     p: &Physiology,
     t: f64,
     aux: f64,
+    f: &[f32],
     x: &mut [f32],
     y: &mut [f32],
     w: &mut [f32],
     lat: &[f32],
-    grp: &[f32],
+    _grp: &[f32],
     u: &[f32],
     mod2: &[f32],
     mod4: &[f32],
-    t1: &[f32],
+    _t1: &[f32],
 ) {
+    let env = &f[..n];
     let (xb, yb, wb) = (&mut x[..n], &mut y[..n], &mut w[..n]);
     match kind {
-        SpeciesKind::SigmoidPlume => perturb_s01(n, p, t, aux, xb, yb, wb, lat),
-        SpeciesKind::CoupledBodies => perturb_s02(n, p, t, xb, yb, wb, mod2),
-        SpeciesKind::MirroredAlien => perturb_s03(n, p, t, xb, yb, wb),
-        SpeciesKind::QuadPlume => perturb_s04(n, p, t, xb, yb, wb, mod4, t1),
-        SpeciesKind::SingleFeather => perturb_s05(n, p, t, aux, xb, yb, wb, u),
+        SpeciesKind::SigmoidPlume => perturb_s01(n, p, t, aux, env, xb, yb, wb, lat),
+        SpeciesKind::CoupledBodies => perturb_s02(n, p, t, env, xb, yb, wb, mod2),
+        SpeciesKind::MirroredAlien => perturb_s03(n, p, t, env, xb, yb, wb),
+        SpeciesKind::QuadPlume => perturb_s04(n, p, t, env, xb, yb, wb, mod4),
+        SpeciesKind::SingleFeather => perturb_s05(n, p, t, aux, env, xb, yb, wb, u),
     }
 }
 
@@ -731,18 +782,18 @@ fn perturb_s01(
     p: &Physiology,
     t: f64,
     aux: f64,
+    env: &[f32],
     x: &mut [f32],
     y: &mut [f32],
     w: &mut [f32],
     lat: &[f32],
 ) {
-    let t32 = t as f32;
+    // src = s01: frame (196.38, 203.49), half 116.95
+    let (cx, cy) = (196.38f32, 203.49f32);
     let aux32 = aux as f32;
     // The body runs head to tail with the index, so `y` is arc position.
-    let mut s_clip = vec![0.0f32; n];
-    for k in 0..n {
-        s_clip[k] = (y[k] / 320.0f32).clamp(0.0, 1.0);
-    }
+    // Displace ACROSS it, with the amplitude growing toward the tail.
+    let s_clip: Vec<f32> = (0..n).map(|k| (y[k] / 320.0f32).clamp(0.0, 1.0)).collect();
     if p.agitation > 0.0 {
         let amp = (7.0 * p.agitation) as f32;
         for k in 0..n {
@@ -761,18 +812,19 @@ fn perturb_s01(
     if p.pulse > 0.0 {
         let g = (1.0 + 0.09 * p.pulse * (t * 0.52).sin()) as f32;
         for k in 0..n {
-            x[k] = x[k] * g;
-            y[k] = y[k] * g;
+            x[k] = cx + (x[k] - cx) * g;
+            y[k] = cy + (y[k] - cy) * g;
         }
     }
-    swell(n, p, &s_clip, x, y, 0.0, 0.0, None);
+    swell(n, p, env, x, y, cx, cy);
     // I/O: a narrow band of excitation travels head to tail.
     if p.surge > 0.01 {
-        let centre = (t * 0.19).rem_euclid(1.2);
-        let gain = (1.0 + 3.4 * p.surge) as f32;
+        let centre = (t * 0.19).rem_euclid(1.2) as f32;
+        let gain = (3.4 * p.surge) as f32;
         for k in 0..n {
-            let band = (-(s_clip[k] - centre as f32 - 0.1f32).powi(2) / 0.09f32).exp();
-            w[k] *= gain * band;
+            let q = (s_clip[k] - centre - 0.1f32) / 0.09f32;
+            let band = (-q * q).exp();
+            w[k] *= 1.0f32 + gain * band;
         }
     }
 }
@@ -784,42 +836,49 @@ fn perturb_s02(
     n: usize,
     p: &Physiology,
     t: f64,
+    env: &[f32],
     x: &mut [f32],
     y: &mut [f32],
     w: &mut [f32],
     mod2: &[f32],
 ) {
-    let t32 = t as f32;
-    let (cx, cy) = (0.0f32, 0.0f32);
-    // m = i%2*9 assigns every sample to one body or the other.
+    // src = s02: frame (213.12, 200.94), half 181.72
+    let (cx, cy) = (213.12f32, 200.94f32);
+    // m = i%2*9 assigns every sample to one body or the other; act on the
+    // two halves oppositely.
     let side: Vec<f32> = (0..n)
         .map(|k| if mod2[k] < 0.5f32 { -1.0f32 } else { 1.0f32 })
         .collect();
-    let ang_rot = (0.22 * p.agitation) * (t * 0.7).sin();
-    let (ca, sa) = (ang_rot.cos() as f32, ang_rot.sin() as f32);
+    let rot_amp = (0.22 * p.agitation) as f32;
+    let rot_sin = (t * 0.7).sin() as f32;
     let dx: Vec<f32> = (0..n).map(|k| x[k] - cx).collect();
     let dy: Vec<f32> = (0..n).map(|k| y[k] - cy).collect();
-    for k in 0..n {
-        x[k] = cx + dx[k] * ca - dy[k] * sa;
-        y[k] = cy + dx[k] * sa + dy[k] * ca;
+    {
+        for k in 0..n {
+            let ang = side[k] * rot_amp * rot_sin;
+            let (ca, sa) = (ang.cos(), ang.sin());
+            x[k] = cx + dx[k] * ca - dy[k] * sa;
+            y[k] = cy + dx[k] * sa + dy[k] * ca;
+        }
     }
     // Thermal: the pair breathes apart and back together.
     let breathe = (6.0 * p.pulse * (t * 0.41).sin()) as f32;
     for k in 0..n {
         x[k] += side[k] * breathe;
     }
-    swell(n, p, &[], x, y, cx, cy, None);
+    swell(n, p, env, x, y, cx, cy);
     // I/O: a packet crosses from one body to the other.
     if p.surge > 0.01 {
         let phase = (t * 0.33).rem_euclid(2.0);
         let want = if phase < 1.0 { -1.0f32 } else { 1.0f32 };
-        let half = 181.72f32.max(1.0); // max(self.src.frame_half, 1.0)
-        let gain = (1.0 + 2.6 * p.surge) as f32;
+        let half = 181.72f64.max(1.0) as f32;
+        let gain = (2.6 * p.surge) as f32;
         for k in 0..n {
             let r = dx[k].hypot(dy[k]) / half;
-            let band = (-(r - (phase % 1.0) as f32).powi(2) / 0.16f32).exp();
+            let q = (r - (phase % 1.0) as f32) / 0.16f32;
+            let band = (-q * q).exp();
             let sel = if side[k] == want { 1.0f32 } else { 0.0f32 };
-            w[k] *= gain * band * sel;
+            w[k] *= 1.0f32 + gain * band * sel;
         }
     }
 }
@@ -827,9 +886,18 @@ fn perturb_s02(
 // =========================================================================
 // 03 - the mirrored alien
 // =========================================================================
-fn perturb_s03(n: usize, p: &Physiology, t: f64, x: &mut [f32], y: &mut [f32], w: &mut [f32]) {
+fn perturb_s03(
+    n: usize,
+    p: &Physiology,
+    t: f64,
+    env: &[f32],
+    x: &mut [f32],
+    y: &mut [f32],
+    w: &mut [f32],
+) {
+    // src = s03: frame (199.38, 182.16), half 164.02
+    let (cx, cy) = (199.38f32, 182.16f32);
     let t32 = t as f32;
-    let (cx, cy) = (0.0f32, 0.0f32);
     let mut dx: Vec<f32> = (0..n).map(|k| x[k] - cx).collect();
     let mut dy: Vec<f32> = (0..n).map(|k| y[k] - cy).collect();
     // Metabolic pulse: a slow breath whose depth rises with temperature.
@@ -848,7 +916,8 @@ fn perturb_s03(n: usize, p: &Physiology, t: f64, x: &mut [f32], y: &mut [f32], w
             dx[k] += amp * s_clip[k] * (dy[k] * 0.16f32 - t23).sin();
         }
     }
-    // THERMAL EXTREME: the creature loses its own mirror plane.
+    // THERMAL EXTREME: the creature loses its own mirror plane. The only
+    // specimen with an exact one, so the only one where the failure shows.
     let skew = smoothstep(0.88, 1.0, p.pulse);
     if skew > 0.0 {
         let scale = (1.0 + 0.26 * skew) as f32;
@@ -864,13 +933,14 @@ fn perturb_s03(n: usize, p: &Physiology, t: f64, x: &mut [f32], y: &mut [f32], w
         x[k] = cx + dx[k];
         y[k] = cy + dy[k];
     }
-    swell(n, p, &s_clip, x, y, cx, cy, None);
+    swell(n, p, env, x, y, cx, cy);
     if p.surge > 0.01 {
-        let centre = (t * 0.22).rem_euclid(1.1);
-        let gain = (1.0 + 1.5 * p.surge) as f32;
+        let centre = (t * 0.22).rem_euclid(1.1) as f32;
+        let gain = (1.5 * p.surge) as f32;
         for k in 0..n {
-            let band = (-(s_clip[k] - centre as f32).powi(2) / 0.12f32).exp();
-            w[k] *= gain * band;
+            let q = (s_clip[k] - centre) / 0.12f32;
+            let band = (-q * q).exp();
+            w[k] *= 1.0f32 + gain * band;
         }
     }
 }
@@ -882,29 +952,27 @@ fn perturb_s04(
     n: usize,
     p: &Physiology,
     t: f64,
+    env: &[f32],
     x: &mut [f32],
     y: &mut [f32],
     w: &mut [f32],
     mod4: &[f32],
-    t1: &[f32],
 ) {
-    let (cx, cy) = (0.0f32, 0.0f32);
+    // src = s04: frame (199.68, 199.70), half 140.80
+    let (cx, cy) = (199.68f32, 199.70f32);
     let dx: Vec<f32> = (0..n).map(|k| x[k] - cx).collect();
     let dy: Vec<f32> = (0..n).map(|k| y[k] - cy).collect();
-    // i%4 is what separates the four plumes in the source; give each its own
-    // small angular lead so load reads as them falling out of step.
-    let ang_rot = (0.11 * p.agitation) as f32;
-    let (ca, sa) = {
-        let mut ca = [0.0f32; 4];
-        let mut sa = [0.0f32; 4];
-        // per-lobe angle: (0.11*agitation) * sin(t*0.9 + lobe*1.9)
-        for (l, (cv, sv)) in ca.iter_mut().zip(sa.iter_mut()).enumerate() {
-            let a = ang_rot * ((t * 0.9) as f32 + (l as f32) * 1.9f32).sin();
-            *cv = a.cos();
-            *sv = a.sin();
-        }
-        (ca, sa)
-    };
+    // i%4 is what separates the four plumes in the source; give each its
+    // own small angular lead so load reads as them falling out of step.
+    let ang_c = (0.11 * p.agitation) as f32;
+    let t09 = (t * 0.9) as f32;
+    let mut ca = [0.0f32; 4];
+    let mut sa = [0.0f32; 4];
+    for (l, (cv, sv)) in ca.iter_mut().zip(sa.iter_mut()).enumerate() {
+        let a = ang_c * (t09 + l as f32 * 1.9f32).sin();
+        *cv = a.cos();
+        *sv = a.sin();
+    }
     for k in 0..n {
         let lobe = mod4[k] as usize;
         x[k] = cx + dx[k] * ca[lobe] - dy[k] * sa[lobe];
@@ -918,16 +986,15 @@ fn perturb_s04(
             y[k] = cy + (y[k] - cy) * g;
         }
     }
-    let t1b = &t1[..n];
-    swell(n, p, &[], x, y, cx, cy, Some(t1b));
+    swell(n, p, env, x, y, cx, cy);
     // I/O: the flare walks round the four.
     if p.surge > 0.01 {
         let hot = (t * 0.6) as i64 % 4;
-        let gain = (1.0 + 2.8 * p.surge) as f32;
+        let gain = (2.8 * p.surge) as f32;
         let hot32 = hot as f32;
         for k in 0..n {
             let sel = if mod4[k] == hot32 { 1.0f32 } else { 0.0f32 };
-            w[k] *= gain * sel;
+            w[k] *= 1.0f32 + gain * sel;
         }
     }
 }
@@ -940,20 +1007,22 @@ fn perturb_s05(
     p: &Physiology,
     t: f64,
     aux: f64,
+    env: &[f32],
     x: &mut [f32],
     y: &mut [f32],
     w: &mut [f32],
     u: &[f32],
 ) {
-    let (cx, cy) = (0.0f32, 0.0f32);
+    // src = s05: frame (214.04, 187.18), half 124.43
+    let (cx, cy) = (214.04f32, 187.18f32);
+    let aux32 = aux as f32;
     let dx: Vec<f32> = (0..n).map(|k| x[k] - cx).collect();
     let dy: Vec<f32> = (0..n).map(|k| y[k] - cy).collect();
-    let half = 124.43f32.max(1.0); // max(self.src.frame_half, 1.0)
+    let half = 124.43f64.max(1.0) as f32;
     let r: Vec<f32> = (0..n).map(|k| dx[k].hypot(dy[k]) / half).collect();
     // The whip: displacement perpendicular to the radius, growing with it.
     if p.agitation > 0.0 {
         let amp_c = (9.0 * p.agitation) as f32;
-        let aux32 = aux as f32;
         for k in 0..n {
             let amp = amp_c * r[k].clamp(0.0, 1.2).powf(1.6);
             let ph = (r[k] * 5.0f32 - aux32).sin();
@@ -973,8 +1042,6 @@ fn perturb_s05(
     // Stress: the feather curls, most at its tip - tension, bounded.
     if p.stress > 0.01 {
         let ang_c = (0.14 * p.stress) as f32;
-        let mut ddx = [0.0f32; 0];
-        let _ = &mut ddx;
         for k in 0..n {
             let ang = ang_c * u[k] * u[k];
             let (ca, sa) = (ang.cos(), ang.sin());
@@ -984,13 +1051,14 @@ fn perturb_s05(
             y[k] = cy + ddx * sa + ddy * ca;
         }
     }
-    swell(n, p, &[], x, y, cx, cy, None);
+    swell(n, p, env, x, y, cx, cy);
     // I/O: the base of the feather flares as a burst enters it.
     if p.surge > 0.01 {
-        let gain = (1.0 + 3.0 * p.surge) as f32;
+        let gain = (3.0 * p.surge) as f32;
         for k in 0..n {
-            let band = (-(r[k] / 0.30f32).powi(2)).exp();
-            w[k] *= gain * band;
+            let q = r[k] / 0.30f32;
+            let band = (-q * q).exp();
+            w[k] *= 1.0f32 + gain * band;
         }
     }
 }

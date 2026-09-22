@@ -6,11 +6,13 @@
 //! variable names (k, e, d, o, q, c), its operator order, and its loop
 //! bounds; the only changes are the ones the vectorised form forces:
 //!
+//! ```text
 //!     mag(a, b)        -> hypot(a, b)
 //!     the for(i=N;i--;) -> one index array
 //!     ternaries        -> select
 //!     point(x, y)      -> one sample in the returned arrays
 //!     circle(x,y,d)    -> one sample carrying a weight (c01 only)
+//! ```
 //!
 //! NUMERICS: the Python ports run the point math in float32 (f64 scalars are
 //! cast to f32 per operation, numpy weak-scalar semantics). The Rust kernels
