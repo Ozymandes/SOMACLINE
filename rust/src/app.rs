@@ -338,20 +338,32 @@ impl Core {
             self.texture_order.push_back(layer.id);
             return tex.clone();
         }
-        // Clone (a refcount bump) so the read can take the &mut cairo demands;
-        // it is the same underlying surface.
+        // cairo-rs refuses an exclusive data lend while any other reference
+        // exists; the console cache always holds one. Blit into a fresh
+        // surface with the context scoped out, then read. Uploads happen only
+        // when a layer's content changes, so the copy is off the hot path.
         let mut surf = layer.surface.clone();
         surf.flush();
-        let (w, h, stride) = (surf.width(), surf.height(), surf.stride() as usize);
-        let data = surf.data().expect("surface data");
-        let bytes = glib::Bytes::from(&data[..]);
+        let (w, h, stride) = (surf.width(), surf.height(), surf.stride());
+        let bytes: glib::Bytes = {
+            let mut copy = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h)
+                .expect("copy surface");
+            {
+                let cr = cairo::Context::new(&copy).expect("copy context");
+                cr.set_source_surface(&surf, 0.0, 0.0).expect("copy source");
+                cr.paint().expect("copy paint");
+            }
+            copy.flush();
+            let d = copy.data().expect("copy surface data");
+            glib::Bytes::from(&d[..])
+        };
         // cairo ARGB32 is native-endian premultiplied: B,G,R,A in memory here
         let tex = gdk4::MemoryTexture::new(
             w,
             h,
             gdk4::MemoryFormat::B8g8r8a8Premultiplied,
             &bytes,
-            stride,
+            stride as usize,
         );
         self.textures.insert(layer.id, tex.clone());
         self.texture_order.push_back(layer.id);
@@ -415,6 +427,8 @@ pub mod imp {
     #[derive(Default)]
     pub struct MonitorViewImp {
         pub core: RefCell<Option<Core>>,
+        pub ds_logged: std::cell::Cell<bool>,
+        pub reg_logged: std::cell::Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -558,6 +572,11 @@ impl MonitorView {
 
         // LAYERS 0-1: background, shell, glass, graticule (static texture)
         let under = self.with_core(|core| core.renderer.layer_under(&layout, &core.model));
+        if self.with_core(|c| c.frames) % 60 == 0 {
+            if let Some(u) = &under {
+                eprintln!("DBG f={} under_dims={}x{} ds_raw={} hidpi={} widget={}x{}", self.with_core(|c| c.frames), u.surface.width(), u.surface.height(), device_scale(self), crate::skin::hidpi::scale(), self.width(), self.height());
+            }
+        }
         let over = self.with_core(|core| {
             core.renderer
                 .layer_over(&layout, &core.model, &core.telemetry)
@@ -631,7 +650,9 @@ impl MonitorView {
             let tex = core.texture(layer);
             (tex, layer.surface.width(), layer.surface.height())
         });
-        let ds = device_scale(self).max(0.001);
+        // app.py divides by hidpi.scale() (the quantized scale the caches
+        // were rendered at), never by the raw surface scale.
+        let ds = crate::skin::hidpi::scale().max(0.001);
         let rect = gtk4::graphene::Rect::new(
             x as f32,
             y as f32,
