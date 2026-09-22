@@ -369,3 +369,124 @@ five times a second.
   HiDPI (by choice, for CPU).
 - Omarchy's default window opacity lets the wallpaper show faintly through
   the glass; see README for the per-window rule.
+
+---
+
+# Final surgical polish + physiology pass (this revision)
+
+## Typography — Astro & Microgramma  **PASS**
+
+`assets/fonts/`: `astro.ttf` (family **Astro**, Regular) and
+`microgrammanormal.ttf` (family **Microgramma**, Normal). Both are installed
+into `~/.local/share/fonts/abyssal/` by `abyssal/ui/fonts.py`
+(`ensure_user_fonts()`), which runs once at `chrome` import — before the
+Pango font map is created — and refreshes fontconfig only when bytes change.
+
+| role | family | where |
+|---|---|---|
+| major display titles | **Astro** | "ABYSSAL ORGANISM MONITOR", specimen scientific name, hero epithet |
+| technical / support type | **Microgramma** | header status rail, bottom archive rail, rack channel titles + captions, state wells, selector service labels, field microcopy |
+| numerics | procedural seven-segment | clock, telemetry numerics, units — untouched |
+| micro labels, axis ticks | JetBrains Mono (unchanged) | graph scales, rulers, tiny axis values |
+
+Caching: nothing regressed. Static type renders into the cached static layers
+(deterministic, byte-identical across cold renders — GATE 8 re-verified);
+live type goes through the same `_show` raster cache as before, whose key now
+includes the family. Font descriptions, widths and cap heights are cached per
+(size, weight, family). No font face is created per frame.
+
+## Selector seat & production ledge  **PASS**
+
+Measured off the authored module (source px): trough interior y 27–235,
+aperture hole 65.5–203.5, key bay 36–204, identifier ledge 207.5. At bay
+height a key left **10.6 px** of trough above it and only **4.8 px** below
+before the ledge divider — it read pushed up out of its well. Fix: one shared
+downward translation, `SEAT_DROP = 3.0/168` of key height (selector.py),
+which balances the reveals (~7.6 / ~7.8) while keeping the key shadow clear
+of the ledge. Pure translation: equal scale, baseline, pitch untouched; hit
+testing, drawing, labels and lamp points all read `key_rect`, so they cannot
+disagree. P4 (wells/keys/labels at 5 sizes) and GATE 6 re-verified.
+
+The grey `01 AQS-0042` ledge identifiers are now **service type**: drawn only
+when the F1 diagnostics overlay is up (`ConsoleModel.diag`, part of the
+static-layer cache key). Production views show clean metal; keyboard 1–5
+still selects.
+
+## Telemetry physiology (propagating pulse)  **PASS**
+
+`python3 qa/physiology_gates.py` — seven deterministic gates (PH1–PH7),
+all through the REAL `PhysiologyModel` and the REAL pulse layer:
+
+- **PH1** the condition (activity 0..1) is normalised against ranges where
+  each sensor means something (CPU concave over 0–85 %, thermal stress
+  onset 77 °C full 93 °C, memory top 20 %, I/O flux, frame-rate shortfall),
+  hysteresis deadband 0.015, asymmetric EMA (rousing τ 1.4 s, calming τ 3.2 s
+  — rouse 93 frames vs calm 444 frames to half amplitude), rate limit
+  0.30/s. Hue mapping `state_hue` monotone blue→orange.
+- **PH2** five species × QUIESCENT/NORMAL/STRESSED: finite everywhere, mean
+  hue strictly ordered (0.114 → 0.417 → ~0.98), activity ordered, extents
+  inside the world.
+- **PH3** wave speed = PULSE_HZ·(1+PULSE_GAIN·excite) per species (e.g.
+  sigmata 0.229 → 0.385 cyc/s under load); front travels forward along the
+  body coordinate by the integrated distance; identical inputs give bitwise
+  identical state.
+- **PH4** personalities: 01 tips lag spine 0.055 and the front turns ragged
+  under stress (17-rad modulation 0.050 vs exactly 0 at rest); 02 bodies
+  alternate at lag 0.500, stress desynchronises and warms one body first;
+  03 mirror symmetric at rest (0.004), heat lags one side 0.028; 04 chase
+  0→1→2→3, stress pulls the four flares together (spread 0.042 → 0.003);
+  05 ribs lag shaft 0.070, stress curls the feather (0.41 rad mean).
+- **PH5** rest identity: with the five drives zeroed (density full) and the
+  condition zero, resting geometry is bitwise independent of the pulse
+  phase; resting colour is subtle abyssal blue; zero telemetry yields zero
+  condition with the idle floors intact.
+- **PH6** rendering at 4 viewports never mutates physiology state; raster
+  deterministic (trail species rendered to steady state first).
+- **PH7** pulse palette covers blue→cyan→aqua→green→lime→amber→orange with
+  no purple or red stop.
+
+Visual proof: `docs/physiology_validation/physiology_5x3.png` (15 renders,
+rows = species, columns = QUIESCENT/NORMAL/STRESSED; per-cell PNGs beside
+it) — states clearly differ, every row stays unmistakably the same organism.
+
+## Live verification under Hyprland  **PASS**
+
+Real app, real telemetry. Idle: cyan body, subtle green. 10-thread CPU load
+for 50 s: lit creature pixels +68 %, warm (amber/orange) share 6.8 % →
+18.9 %, concentrated along the stressed spine/tail — spatial, never a
+whole-body tint (docs/shots/live-stressed-glass.png). 40 s after load:
+warm 0.00 %, smooth recovery (live-recovered-glass.png). Machine
+temperature was allowed to move only within ordinary bands.
+
+## Performance re-measurement (`qa/perf_live.py`, 8 s dwell)
+
+| layout | state | CPU % | FPS | draw ms | sim ms | tel ms | cadence |
+|---|---|---|---|---|---|---|---|
+| compact 600×480 | focused | 17.5 | 61.2 | 0.95 | 0.76 | 0.36 | 60 |
+| compact | unfocused | 10.0 | 30.4 | 1.14 | 0.80 | 0.40 | 30 |
+| instrument 900×700 | focused | **20.7** | 61.0 | 1.30 | 0.81 | 0.41 | 60 |
+| instrument | unfocused | **12.2** | 30.3 | 1.64 | 0.84 | 0.42 | 30 |
+| instrument | hidden | **0.2** | — | — | — | — | 0 |
+| archive 1440×900 | focused | **25.5** | 60.2 | 1.75 | 0.78 | 0.38 | 60 |
+| archive | unfocused | 15.7 | 29.6 | 2.59 | 0.83 | 0.38 | 30 |
+| archive | hidden | **0.1** | — | — | — | — | 0 |
+
+Against the previous envelope: canonical focused ~20 → **20.7 %**, unfocused
+~12 → **12.2 %**, hidden ~0.2 → **0.1–0.2 %**, archive ~27 → **25.5 %**.
+The physiology accumulators and typography cost within noise; no envelope
+regression. GATE 0 torture re-run after the pass: 62 transitions, 140
+resizes, 0 rebuilds, isotropy 1.1e-13 px, monotonic clock — PASS.
+
+## Keybinding  **PASS**
+
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + ALT + A", "Abyssal Organism Monitor",
+       "/home/seeno/abyssal-organism-monitor/run.sh")
+```
+
+Conflict check (`omarchy menu keybindings --print`): SUPER+ALT+A was free
+(only SUPER+SHIFT+ALT+A → Grok exists). Plain exec launch — the app is
+deliberately NON-UNIQUE and keeps no daemon, so single-instance logic was
+deliberately not added. `hyprctl configerrors` clean.
