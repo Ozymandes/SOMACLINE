@@ -10,6 +10,7 @@
 //!   app                      <- app.py (the GTK host)
 
 pub mod app;
+pub mod host;
 pub mod layout;
 pub mod lighting;
 pub mod mathforms;
