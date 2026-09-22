@@ -11,3 +11,4 @@ assets/hardware_v2/*/
 
 # Rejected / superseded module generations: kept on disk, out of git.
 assets/modules/rejected/
+rust/target/
