@@ -34,13 +34,21 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
-use crate::host::{Cmd, Core, Options, APP_ID, TELEMETRY_HZ};
+use crate::host::{Cmd, Core, DeviceLayers, Options, Target, APP_ID, TELEMETRY_HZ};
 use crate::present::{FramePresenter, SoftbufferPresenter};
 use crate::skin::hidpi;
 use crate::ui::fonts;
 
 /// Probe cadence, matching the GTK host's 2 s glib timeout.
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long to wait for a requested frame before concluding that nothing is
+/// looking. On Wayland, winit defers `RedrawRequested` to the compositor's
+/// frame callback, and an occluded or unmapped surface receives no callbacks
+/// at all - that silence IS the occlusion signal, and it is what GTK read
+/// explicitly from `xdg_toplevel`'s SUSPENDED state. 250 ms is far longer
+/// than a refresh (16.7 ms at 60 Hz) and short enough to resume instantly.
+const FRAME_STALL: Duration = Duration::from_millis(250);
 
 /// The resolved geometry of one frame: logical size for the machine, physical
 /// size for the buffer, and the exact per-axis scale that ties them together.
@@ -77,6 +85,20 @@ pub fn metrics(phys_w: u32, phys_h: u32, scale: f64) -> Metrics {
     }
 }
 
+impl Metrics {
+    pub fn target(&self) -> Target {
+        Target {
+            logical_w: self.logical_w,
+            logical_h: self.logical_h,
+            phys_w: self.phys_w as i32,
+            phys_h: self.phys_h as i32,
+            ds_x: self.ds_x,
+            ds_y: self.ds_y,
+            scale: self.scale,
+        }
+    }
+}
+
 /// GDK's name for a winit key, so `Core::key_command` needs only one table.
 fn gdk_key_name(key: &Key) -> Option<String> {
     match key {
@@ -110,6 +132,9 @@ struct App {
     occluded: bool,
     fullscreen: bool,
     cursor: Option<PhysicalPosition<f64>>,
+    dev: DeviceLayers,
+    /// When the frame currently in flight was asked for, if any.
+    frame_pending: Option<Instant>,
     next_telemetry: Instant,
     next_probe: Instant,
     quit_at: Option<Instant>,
@@ -140,6 +165,8 @@ impl App {
             occluded: false,
             fullscreen: false,
             cursor: None,
+            dev: DeviceLayers::new(),
+            frame_pending: None,
             next_telemetry: now,
             next_probe: now + PROBE_INTERVAL,
             quit_at,
@@ -149,6 +176,16 @@ impl App {
 
     fn now_us(&self) -> f64 {
         self.epoch.elapsed().as_micros() as f64
+    }
+
+    /// Ask for a frame and remember that one is in flight.
+    fn request_frame(&mut self) {
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+            if self.frame_pending.is_none() {
+                self.frame_pending = Some(Instant::now());
+            }
+        }
     }
 
     /// Re-read the window's size and scale, and match the presenter to them.
@@ -174,11 +211,7 @@ impl App {
     fn obey(&mut self, cmd: Cmd, event_loop: &ActiveEventLoop) {
         match cmd {
             Cmd::Ignored => {}
-            Cmd::Redraw => {
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
-            }
+            Cmd::Redraw => self.request_frame(),
             Cmd::Quit => event_loop.exit(),
             Cmd::Fullscreen => {
                 self.fullscreen = !self.fullscreen;
@@ -194,6 +227,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.frame_pending = None;
         self.sync_metrics();
         let (Some(m), Some(window), Some(presenter)) = (
             self.metrics,
@@ -205,10 +239,12 @@ impl App {
         // The caches quantise the RAW scale factor, exactly as under GTK.
         hidpi::set_scale(m.scale);
         let core = &mut self.core;
+        let dev = &mut self.dev;
+        let target = m.target();
         // Tell the compositor a frame is coming, so it can time its own.
         window.pre_present_notify();
         let res = presenter.present(m.ds_x, m.ds_y, &mut |cr| {
-            core.compose_frame(cr, m.logical_w, m.logical_h, m.scale);
+            core.compose_frame(cr, target, dev);
         });
         if let Err(e) = res {
             eprintln!("abyssal: {e}");
@@ -266,12 +302,15 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.sync_metrics();
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                self.request_frame();
             }
             WindowEvent::Focused(f) => self.focused = f,
-            WindowEvent::Occluded(o) => self.occluded = o,
+            WindowEvent::Occluded(o) => {
+                self.occluded = o;
+                if o {
+                    self.frame_pending = None;
+                }
+            }
             WindowEvent::RedrawRequested => self.redraw(),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor = Some(position);
@@ -328,20 +367,36 @@ impl ApplicationHandler for App {
             self.next_probe = now + PROBE_INTERVAL;
         }
 
-        let fps = self.core.cadence_now(self.focused, self.occluded);
-        if let Some(dt) = self.core.due(self.now_us(), fps) {
-            self.core.advance(dt);
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        }
-
-        // Wake for whichever comes first: the next frame, the next sample.
         let mut wake = self.next_telemetry.min(self.next_probe);
-        if fps > 0.0 {
-            let ahead = self.core.next_frame_us() - self.now_us();
-            let frame_at = now + Duration::from_micros(ahead.max(0.0) as u64);
-            wake = wake.min(frame_at);
+
+        // Never run ahead of the compositor. While a frame is in flight the
+        // simulation waits, which is what couples the loop to the display's
+        // refresh; and when the surface is not being shown, no frame callback
+        // ever arrives, so the loop settles into one no-op wakeup every
+        // FRAME_STALL. That silence is this host's SUSPENDED signal.
+        match self.frame_pending {
+            Some(since) if since.elapsed() < FRAME_STALL => {
+                wake = wake.min(since + FRAME_STALL);
+            }
+            Some(_) => {
+                // Stalled: ask again, but advance NOTHING. GTK's suspended
+                // window simulated nothing either, and `due` clamps the dt
+                // when the frames come back, so the organism cannot teleport.
+                self.frame_pending = None;
+                self.request_frame();
+                wake = wake.min(now + FRAME_STALL);
+            }
+            None => {
+                let fps = self.core.cadence_now(self.focused, self.occluded);
+                if let Some(dt) = self.core.due(self.now_us(), fps) {
+                    self.core.advance(dt);
+                    self.request_frame();
+                }
+                if fps > 0.0 {
+                    let ahead = self.core.next_frame_us() - self.now_us();
+                    wake = wake.min(now + Duration::from_micros(ahead.max(0.0) as u64));
+                }
+            }
         }
         if let Some(q) = self.quit_at {
             wake = wake.min(q);

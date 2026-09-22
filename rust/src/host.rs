@@ -598,32 +598,140 @@ fn paint_layer(cr: &Context, layer: Option<&Layer>, x: f64, y: f64, pad: bool) {
     let _ = cr.paint();
 }
 
+/// Where a composed frame is going: logical size for the machine, physical
+/// size for the buffer, and the exact per-axis scale that ties them together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Target {
+    pub logical_w: f64,
+    pub logical_h: f64,
+    pub phys_w: i32,
+    pub phys_h: i32,
+    pub ds_x: f64,
+    pub ds_y: f64,
+    /// The window's raw scale factor, for the debug overlay to print.
+    pub scale: f64,
+}
+
+impl Target {
+    /// A target whose device scale is exactly `ds` - the headless case.
+    pub fn exact(logical_w: f64, logical_h: f64, ds: f64) -> Target {
+        let (pw, ph) = ((logical_w * ds).ceil() as i32, (logical_h * ds).ceil() as i32);
+        Target {
+            logical_w,
+            logical_h,
+            phys_w: pw,
+            phys_h: ph,
+            ds_x: pw as f64 / logical_w,
+            ds_y: ph as f64 / logical_h,
+            scale: ds,
+        }
+    }
+}
+
+/// The two full-window static layers, pre-resampled to the target's device
+/// resolution.
+///
+/// Under GTK this cache did not need to exist: GSK uploaded each cached layer
+/// once and the GPU resampled the 1.5-scale texture into the 1.6-scale window
+/// every frame for free. Cairo does that resample on the CPU, and measured at
+/// 781x468 / ds 1.6 it cost 2.05 ms per frame against 0.77 ms for an unscaled
+/// blit. Doing it ONCE per layer change restores GTK's economics.
+///
+/// It is bit-identical, not an approximation: the same cairo filter at the
+/// same scale, just not sixty times a second. Compositing a layer onto a
+/// transparent surface and then compositing that is exactly source-over
+/// associativity on premultiplied alpha.
+///
+/// Cost: two ARGB32 surfaces at device resolution (7.5 MB at 1250x749).
+#[derive(Default)]
+pub struct DeviceLayers {
+    key: Option<(u64, u64, i32, i32)>,
+    under: Option<cairo::ImageSurface>,
+    over: Option<cairo::ImageSurface>,
+}
+
+impl DeviceLayers {
+    pub fn new() -> DeviceLayers {
+        DeviceLayers::default()
+    }
+
+    /// Bytes currently held, for the record.
+    pub fn bytes(&self) -> usize {
+        [&self.under, &self.over]
+            .iter()
+            .filter_map(|s| s.as_ref())
+            .map(|s| (s.stride() as usize) * (s.height() as usize))
+            .sum()
+    }
+
+    /// True when a layer is ALREADY at the target's device resolution, which
+    /// is the whole-number-scale case (and the headless one). Then there is
+    /// nothing to resample and nothing to cache: the original blits 1:1.
+    fn is_native(src: &Layer, t: &Target) -> bool {
+        let (dx, dy) = src.surface.device_scale();
+        src.surface.width() == t.phys_w
+            && src.surface.height() == t.phys_h
+            && (dx - t.ds_x).abs() < 1e-9
+            && (dy - t.ds_y).abs() < 1e-9
+    }
+
+    fn resample(src: &Layer, t: &Target) -> Option<cairo::ImageSurface> {
+        let dst = cairo::ImageSurface::create(cairo::Format::ARgb32, t.phys_w, t.phys_h).ok()?;
+        dst.set_device_scale(t.ds_x, t.ds_y);
+        {
+            let cr = Context::new(&dst).ok()?;
+            paint_layer(&cr, Some(src), 0.0, 0.0, true);
+        }
+        dst.flush();
+        Some(dst)
+    }
+
+    /// Rebuild only when a layer's identity or the buffer size changes.
+    /// A `Layer` id is stable for the lifetime of its pixels, so this is
+    /// exact: content changes produce a new id.
+    fn prepare(&mut self, under: Option<&Layer>, over: Option<&Layer>, t: &Target) {
+        let key = (
+            under.map(|l| l.id).unwrap_or(0),
+            over.map(|l| l.id).unwrap_or(0),
+            t.phys_w,
+            t.phys_h,
+        );
+        if self.key == Some(key) {
+            return;
+        }
+        self.under = under
+            .filter(|l| !Self::is_native(l, t))
+            .and_then(|l| Self::resample(l, t));
+        self.over = over
+            .filter(|l| !Self::is_native(l, t))
+            .and_then(|l| Self::resample(l, t));
+        self.key = Some(key);
+    }
+
+    /// Blit a prepared layer. Its device scale equals the target's, so cairo
+    /// takes the unscaled path.
+    fn blit(cr: &Context, surf: Option<&cairo::ImageSurface>) {
+        let Some(s) = surf else { return };
+        if cr.set_source_surface(s, 0.0, 0.0).is_err() {
+            return;
+        }
+        let _ = cr.paint();
+    }
+}
+
 impl Core {
     /// Compose one whole frame into `cr`, in LOGICAL coordinates.
     ///
     /// The caller has already set `skin::hidpi::set_scale()` and given the
     /// target its device scale; this function is the same four-layer sequence
     /// the GTK host feeds to GSK, drawn with cairo instead.
-    ///
-    /// `width`/`height` are LOGICAL. `report_ds` is the scale the debug
-    /// overlay should print (the window's real scale factor).
-    pub fn compose_frame(&mut self, cr: &Context, width: f64, height: f64, report_ds: f64) {
+    pub fn compose_frame(&mut self, cr: &Context, t: Target, dev: &mut DeviceLayers) {
+        let (width, height) = (t.logical_w, t.logical_h);
         if width < 1.0 || height < 1.0 {
             return;
         }
         let t0 = Instant::now();
         let (layout, glass, vp) = self.frame_geometry(width, height);
-
-        // Scrub the buffer to OPAQUE black. Two jobs: a presentation buffer
-        // comes back with undefined contents (it may be a different one each
-        // frame), and the frame must end fully opaque because softbuffer
-        // discards the alpha byte - a premultiplied pixel with a < 255 would
-        // otherwise present darkened.
-        let _ = cr.save();
-        cr.set_operator(cairo::Operator::Source);
-        cr.set_source_rgb(0.0, 0.0, 0.0);
-        let _ = cr.paint();
-        let _ = cr.restore();
 
         // LAYERS 0-1: background, shell, glass, graticule (static)
         let under = self.renderer.layer_under(&layout, &self.model);
@@ -631,8 +739,25 @@ impl Core {
         let over = self
             .renderer
             .layer_over(&layout, &self.model, &self.telemetry);
+        dev.prepare(under.as_ref(), over.as_ref(), &t);
 
-        paint_layer(cr, under.as_ref(), 0.0, 0.0, true);
+        // Scrub the buffer to OPAQUE black. Two jobs: a presentation buffer
+        // comes back with undefined contents (it may be a different one each
+        // frame), and the frame must end fully opaque because softbuffer
+        // discards the alpha byte - a premultiplied pixel with a < 255 would
+        // otherwise present darkened. The `under` layer is NOT fully opaque
+        // at every layout (measured: opaque at 600x520 and 1400x880, not at
+        // 781x468), so this is load-bearing, not belt-and-braces.
+        let _ = cr.save();
+        cr.set_operator(cairo::Operator::Source);
+        cr.set_source_rgb(0.0, 0.0, 0.0);
+        let _ = cr.paint();
+        let _ = cr.restore();
+
+        match dev.under.as_ref() {
+            Some(s) => DeviceLayers::blit(cr, Some(s)),
+            None => paint_layer(cr, under.as_ref(), 0.0, 0.0, true),
+        }
 
         // LAYER 2: the organism - the only per-frame raster, glass only
         if glass.valid() {
@@ -654,9 +779,16 @@ impl Core {
             let _ = cr.restore();
         }
 
-        paint_layer(cr, over.as_ref(), 0.0, 0.0, true);
+        match dev.over.as_ref() {
+            Some(s) => DeviceLayers::blit(cr, Some(s)),
+            None => paint_layer(cr, over.as_ref(), 0.0, 0.0, true),
+        }
 
-        // LAYERS 4-6: live regions, each re-rendered only on its own change
+        // LAYERS 4-6: live regions, each re-rendered only on its own change.
+        // These keep the per-frame resample: they move (their logical origin
+        // lands on a fractional device pixel at a fractional scale), they are
+        // small, and most change several times a second, so a device-side
+        // copy would be rebuilt almost as often as it was used.
         let regions = self.renderer.regions(
             &layout,
             &self.model,
@@ -676,7 +808,7 @@ impl Core {
         self.draw_ms = t0.elapsed().as_secs_f64() * 1000.0;
         self.draw_acc += self.draw_ms;
         if self.show_debug {
-            let info = self.debug_info(&layout, report_ds);
+            let info = self.debug_info(&layout, t.scale);
             debug::draw_debug(cr, &layout, &vp, &info);
         }
         self.frames += 1;
@@ -765,6 +897,59 @@ mod paint_tests {
             let (r, g, b, a) = px(&mut tgt, pw / 2, ph / 2);
             assert!(a > 250 && b > r && b > 100,
                     "{tag}: centre is {r},{g},{b},{a} - expected the layer body");
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// The device-resolution cache must be BIT-IDENTICAL to resampling every
+    /// frame, not merely close: resampling a layer once into a device-scaled
+    /// surface and blitting that 1:1 has to produce the same bytes as
+    /// resampling it straight into the frame. (Source-over associativity on
+    /// premultiplied alpha; cairo uses the same filter either way.) If this
+    /// ever drifts, the cache is an approximation and the parity table is a
+    /// lie - so it is asserted, byte for byte, at the fractional scale.
+    #[test]
+    fn the_device_cache_is_bit_identical_to_resampling_every_frame() {
+        for (cache_ds, win_ds) in [(1.5_f64, 1.6_f64), (1.5, 1.0), (1.0, 1.6), (2.0, 1.6)] {
+            let (lw, lh) = (240.0_f64, 150.0_f64);
+            let layer = probe_layer(cache_ds, lw, lh);
+            let (pw, ph) = ((lw * win_ds) as i32, (lh * win_ds) as i32);
+            let t = Target {
+                logical_w: lw,
+                logical_h: lh,
+                phys_w: pw,
+                phys_h: ph,
+                ds_x: pw as f64 / lw,
+                ds_y: ph as f64 / lh,
+                scale: win_ds,
+            };
+
+            // (a) straight into the frame, every frame
+            let direct = target(pw, ph, t.ds_x, t.ds_y);
+            {
+                let cr = Context::new(&direct).unwrap();
+                paint_layer(&cr, Some(&layer), 0.0, 0.0, true);
+            }
+            // (b) resampled once, then blitted 1:1
+            let cached = target(pw, ph, t.ds_x, t.ds_y);
+            {
+                let dev = DeviceLayers::resample(&layer, &t).expect("device copy");
+                let cr = Context::new(&cached).unwrap();
+                DeviceLayers::blit(&cr, Some(&dev));
+            }
+            let mut direct = direct;
+            let mut cached = cached;
+            direct.flush();
+            cached.flush();
+            let (a, b) = (direct.data().unwrap(), cached.data().unwrap());
+            assert_eq!(a.len(), b.len());
+            let diff = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+            assert_eq!(
+                diff, 0,
+                "cache {cache_ds} -> window {win_ds}: {diff} of {} bytes differ - \
+                 the device cache is NOT bit-identical",
+                a.len()
+            );
         }
         hidpi::set_scale(1.0);
     }

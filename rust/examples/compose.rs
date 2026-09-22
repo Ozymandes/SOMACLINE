@@ -105,13 +105,15 @@ fn main() {
     // the caches quantise the raw scale factor; the target carries the exact
     // physical/logical ratio.
     abyssal::skin::hidpi::set_scale(ds);
-    let (pw, ph) = (((w as f64) * ds).ceil() as i32, ((h as f64) * ds).ceil() as i32);
+    let target = abyssal::host::Target::exact(w as f64, h as f64, ds);
+    let (pw, ph) = (target.phys_w, target.phys_h);
     let surface =
         cairo::ImageSurface::create(cairo::Format::ARgb32, pw, ph).expect("target");
-    surface.set_device_scale(pw as f64 / w as f64, ph as f64 / h as f64);
+    surface.set_device_scale(target.ds_x, target.ds_y);
     {
         let cr = cairo::Context::new(&surface).unwrap();
-        core.compose_frame(&cr, w as f64, h as f64, ds);
+        let mut dev = abyssal::host::DeviceLayers::new();
+        core.compose_frame(&cr, target, &mut dev);
     }
     surface.flush();
     let mut png = std::fs::File::create(&out).unwrap();
