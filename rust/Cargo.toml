@@ -2,7 +2,15 @@
 name = "abyssal"
 version = "1.0.0"
 edition = "2021"
-description = "Abyssal Organism Monitor — native Rust port"
+rust-version = "1.75"
+description = "A biocomputational observation console: five procedural specimens whose physiology responds to live machine telemetry"
+readme = "../README.md"
+repository = "https://github.com/REPLACE-ME/abyssal-organism-monitor"
+homepage = "https://github.com/REPLACE-ME/abyssal-organism-monitor"
+keywords = ["generative", "wayland", "telemetry", "cairo", "winit"]
+categories = ["visualization", "gui"]
+# license = "REPLACE-ME"   # see LICENSING.md - not settled, so not declared
+publish = false
 default-run = "abyssal"
 
 # Two hosts, one machine. The feature split is not cosmetic: it is what makes

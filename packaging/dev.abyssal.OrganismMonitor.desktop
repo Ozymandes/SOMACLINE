@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Abyssal Organism Monitor
+GenericName=Organism Monitor
+Comment=A biocomputational observation console driven by live machine telemetry
+Exec=abyssal-monitor
+TryExec=abyssal-monitor
+Icon=dev.abyssal.OrganismMonitor
+Terminal=false
+Categories=Utility;Monitor;Graphics;
+Keywords=telemetry;monitor;generative;organism;
+StartupNotify=true
+StartupWMClass=dev.abyssal.OrganismMonitor
