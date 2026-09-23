@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Abyssal Organism Monitor - native Rust launcher, winit + softbuffer host.
 #
-# This host links NO GTK: the crate's gtk4/gdk4/gio dependencies are optional
-# and off here, so nothing of the GTK stack is mapped. run-rust.sh (GTK) stays
-# the reference implementation and the fallback until this one is accepted.
+# THIS IS THE RELEASE BUILD. It links no GTK: the crate's gtk4/gdk4/gio
+# dependencies are optional and off here, so nothing of the GTK stack is
+# mapped. run-rust.sh (GTK) is kept as a development reference and parity
+# oracle, not as a fallback.
+#
+# This runs in place, from the checkout, and rebuilds on demand. To install
+# the application properly - binary, assets, desktop entry, icon - use
+# ./install.sh instead.
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 BIN="rust/target/release/abyssal-winit"
