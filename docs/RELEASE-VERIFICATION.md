@@ -1,4 +1,4 @@
-# Release verification — v1.0.0 candidate
+# Release verification — SOMACLINE v1.0.0 candidate
 
 Everything below was run against the shipping build on this machine
 (Arch/Omarchy, Hyprland 0.56.2, 2560×1600 @ 120 Hz, display scale 1.6,
@@ -154,6 +154,74 @@ directory **renamed away**, then the installed binary run from `/tmp`:
 not to this application. `DESTDIR=… --prefix /usr` stages cleanly: five files
 plus 74 asset files, 23 MB.
 
+## Brand integration and history cleanup
+
+Run after the verification above, then re-verified from a fresh clone.
+
+### Identity
+
+`dev.somacline.Somacline` / window title `Somacline` / binary `somacline` /
+assets at `<prefix>/share/somacline/`. The Rust crate stays `abyssal`
+internally. The engraved faceplate still carries the instrument's model
+designation, `ABYSSAL ORGANISM MONITOR` — see the note at the end.
+
+### Icon
+
+Extracted from `docs/brand/somacline-logo.png`, which holds six variants. The
+app-icon badge is the standalone mark in the top right, taken by its own alpha
+bounding box at (1267, 85)–(1590, 407) — 324×324 native, transparent — squared
+and resampled with Lanczos to 256/128/64/48/32, installed into hicolor.
+
+### Typefaces, verified both ways
+
+| state | result |
+|---|---|
+| **neither face anywhere** — repository copy moved aside, `~/.local/share/fonts` cleared, `fc-cache -f`, `fc-list` finding 0 | launches, renders completely on fontconfig substitutions: every module composes, nothing overflows, no missing glyphs, 60 FPS, **0 bytes on stderr** |
+| **operator supplies them** in `assets/fonts/` | registered on launch, `fc-list` finds 2, header renders in the display faces (header strip differs by 214 from the fallback render) |
+
+No font file is in the repository, in any commit at HEAD, or in any install:
+`find <prefix> -iname '*.ttf' -o -iname '*.otf'` → **0**.
+
+### History cleanup
+
+Backed up first: `git bundle create --all` → `~/somacline-pre-rewrite/`
+(437 MB, `git bundle verify` reports "records a complete history", all three
+refs), with `refs-before.txt` and `HEAD-before.txt` beside it.
+
+The plan was `rust/floor/target` only. Auditing the blob weight first showed
+`rust/target/` had *also* been committed early on — a 105 MB `libgtk4` rlib
+among others — before it was gitignored in `e4d50e1`. Removing only the first
+would have left 598 MB of build output in history, so both went:
+
+    git filter-branch --index-filter         'git rm -r --cached --ignore-unmatch rust/target rust/floor/target'         --tag-name-filter cat -- --all
+
+| | before | after |
+|---|---:|---:|
+| blobs under either build dir, all history | 996.2 MB | **0** |
+| `.git` | 439 MB | **181 MB** |
+| fresh clone, total | — | **276 MB** (181 MB `.git` + 88.5 MB tree) |
+
+Every one of the five affected commits carries source as well, so none became
+empty and the history shape is unchanged: 48 commits on the branch, 33 on
+master, 15 ahead. The tag `pre-convergence` was reported "unchanged" — its
+commit predates the artifacts, carries none, and is still an ancestor of both
+branches, so it remains valid.
+
+What remains in history is real content: `docs` 125.5 MB (screenshots
+regenerated across the project's life), `assets` 47.0 MB, `rust` 9.1 MB.
+
+### Re-verified from a fresh clone
+
+`git clone` of the rewritten repository into a scratch directory, then:
+
+| | |
+|---|---|
+| clean release build | **42.3 s**, binary 2.58 MB |
+| tests | **49 passed, 0 failed** |
+| `./install.sh --prefix <scratch> --no-build` | 5 files + 72 assets, 21 MB, **0 font files** |
+| installed binary, run from `/tmp` | window `dev.somacline.Somacline` / `Somacline`, full instrument, 61 FPS, **0 bytes on stdout and stderr** |
+| `--uninstall` | clean |
+
 ## Known and not fixed
 
 **A pre-existing compositor artifact.** Under Hyprland 0.56.2 at fractional
@@ -167,6 +235,16 @@ outside this process.
 **A resize hitch.** A resize after four seconds of stillness costs one ~161 ms
 frame instead of ~56 ms, because the sprite masters are decoded again. This is
 the deliberate price of handing ~30 MB back while the window sits idle.
+
+**The faceplate is not rebranded.** The instrument's engraved header reads
+ABYSSAL ORGANISM MONITOR, its model designation — the footer rail already
+carries the model number AOM-1 and the serial AQS-0042. Changing it is six
+string literals, three in Rust (`ui/chrome.rs:43`, `ui/console.rs:1065`,
+`ui/console.rs:1254`) and three in the Python oracle (`ui/chrome.py:67`,
+`ui/console.py:683`, `ui/console.py:840`). They must move together or the
+parity fixtures break in the header band; no golden fixture contains the
+string, so nothing would need regenerating. It is a rendered-pixel change that
+was not requested, so it was not made.
 
 **Injection flakiness in the harness, not the app.** `wtype` drops roughly two
 key presses in five on this compositor. `qa/release_interaction.py` retries
