@@ -12,3 +12,8 @@ assets/hardware_v2/*/
 # Rejected / superseded module generations: kept on disk, out of git.
 assets/modules/rejected/
 rust/target/
+
+# Cargo build output. `rust/target/` was ignored; the framework-floor probe's
+# own target/ was not, and 720.8 MB of compiled rlibs across 1338 files had
+# been committed. Untracked in the release audit; the probe SOURCE stays.
+rust/floor/target/
