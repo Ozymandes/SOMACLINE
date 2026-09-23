@@ -35,17 +35,7 @@ pub const MIN_MIDDLE_SHARE: f64 = 0.34;
 pub const MIN_BORDER_SCALE: f64 = 0.45;
 
 fn sprite_roots() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        v.push(PathBuf::from(manifest).join("../assets/sprites"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for up in ["../../../assets/sprites", "../../../../assets/sprites"] {
-            v.push(exe.parent().unwrap_or(std::path::Path::new(".")).join(up));
-        }
-    }
-    v.push(PathBuf::from("assets/sprites"));
-    v
+    crate::skin::asset_roots("sprites")
 }
 
 #[derive(Clone)]

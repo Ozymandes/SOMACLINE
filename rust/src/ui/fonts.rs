@@ -13,21 +13,9 @@ use std::path::{Path, PathBuf};
 
 const FONTS: [&str; 2] = ["astro.ttf", "microgrammanormal.ttf"];
 
-/// Candidate locations of the repo's assets/fonts directory.
+/// Candidate locations of the assets/fonts directory.
 fn font_sources() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        // crate lives in <repo>/rust
-        v.push(Path::new(&manifest).join("../assets/fonts"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        // <repo>/rust/target/release/abyssal -> <repo>
-        for up in ["../../../assets/fonts", "../../../../assets/fonts"] {
-            v.push(exe.parent().unwrap_or(Path::new(".")).join(up));
-        }
-    }
-    v.push(PathBuf::from("assets/fonts"));
-    v
+    crate::skin::asset_roots("fonts")
 }
 
 fn digest_eq(src: &Path, dst: &Path) -> bool {
