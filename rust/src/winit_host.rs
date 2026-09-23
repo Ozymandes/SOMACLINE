@@ -375,6 +375,10 @@ impl ApplicationHandler for App {
             self.next_probe = now + PROBE_INTERVAL;
         }
 
+        // Hand the sprite sources back when the machine has been still long
+        // enough. Cheap: a counter compare until it fires.
+        self.core.settle(self.epoch.elapsed().as_secs_f64());
+
         let mut wake = self.next_telemetry.min(self.next_probe);
 
         // Never run ahead of the compositor. While a frame is in flight the

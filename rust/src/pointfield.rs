@@ -66,6 +66,22 @@ impl FieldCache {
         self.entries.clear();
     }
 
+    /// (entries, bytes) currently held. The accumulators are the largest
+    /// single allocation in the program at a big window, so they are counted.
+    pub fn inventory(&self) -> (usize, usize) {
+        let b = self
+            .entries
+            .iter()
+            .map(|e| e.w * e.h * 4 * 3) // acc, acc_e, acc_h, f32 each
+            .sum();
+        (self.entries.len(), b)
+    }
+
+    /// The keys currently resident, for the ownership inventory.
+    pub fn keys(&self) -> Vec<(String, usize, usize)> {
+        self.entries.iter().map(|e| (e.key.clone(), e.w, e.h)).collect()
+    }
+
     /// Fetch (or create) the entry for (key, w, h), LRU order, bounded.
     pub fn entry(&mut self, key: &str, w: usize, h: usize) -> &mut FieldEntry {
         let stride =

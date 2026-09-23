@@ -353,6 +353,13 @@ impl SourceBody {
 
     /// (world x, world y, weight) for this frame.
     #[inline]
+    /// Bytes held by this body's sample arrays. Fourteen f32 vectors of the
+    /// source's sample count; nothing here is derived or re-derivable cheaply,
+    /// which is why a built specimen is kept for the life of the process.
+    pub fn bytes(&self) -> usize {
+        14 * self.u.len() * std::mem::size_of::<f32>()
+    }
+
     pub fn points(&self) -> (&[f32], &[f32], &[f32]) {
         (
             &self.x[..self.live],

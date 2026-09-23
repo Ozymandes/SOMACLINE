@@ -105,6 +105,14 @@ impl RenderCaches {
         self.fields.clear();
         self.wash.clear();
     }
+
+    /// (discs, bytes) held by the deep-field wash cache.
+    pub fn wash_inventory(&self) -> (usize, usize) {
+        (
+            self.wash.len(),
+            self.wash.iter().map(|(_, s, _)| (s.stride() as usize) * (s.height() as usize)).sum(),
+        )
+    }
 }
 
 /// The deep-field wash, rendered once per quantised radius. Filling a 900px

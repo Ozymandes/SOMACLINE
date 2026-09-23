@@ -122,6 +122,35 @@ impl IndexedLru {
     }
 }
 
+/// (sprites, bytes) held by the full-resolution source cache, and the same
+/// for the derived-size LRU. Reading a cache's size changes no output.
+pub fn cache_inventory() -> ((usize, usize), (usize, usize)) {
+    fn bytes(s: &ImageSurface) -> usize {
+        (s.stride() as usize) * (s.height() as usize)
+    }
+    let base = BASE.with_borrow(|m| {
+        (
+            m.values().filter(|v| v.is_some()).count(),
+            m.values().flatten().map(bytes).sum(),
+        )
+    });
+    let scaled = SCALED.with_borrow(|l| (l.map.len(), l.map.values().map(bytes).sum()));
+    (base, scaled)
+}
+
+/// The largest source sprites resident, biggest first, for the inventory.
+pub fn base_cache_entries() -> Vec<(&'static str, i32, i32, usize)> {
+    let mut v: Vec<_> = BASE.with_borrow(|m| {
+        m.iter()
+            .filter_map(|(k, v)| v.as_ref().map(|s| {
+                (*k, s.width(), s.height(), (s.stride() as usize) * (s.height() as usize))
+            }))
+            .collect()
+    });
+    v.sort_by_key(|e| std::cmp::Reverse(e.3));
+    v
+}
+
 // --------------------------------------------------------------------- load
 // (asset-root cache)
 thread_local! {
@@ -224,6 +253,41 @@ pub fn skin_stats() -> SkinStats {
 
 pub fn clear_cache() {
     SCALED.with_borrow_mut(|s| s.clear());
+}
+
+/// Drop the full-resolution PNG sources, keeping every derived surface.
+/// Returns the bytes released.
+///
+/// A source sprite exists to be RENDERED INTO a derived size. Once a layout
+/// has settled, what every frame actually blits is the `SCALED` entry; the
+/// masters behind it - `module/shell` is 1600x1172, 7.15 MB - are dead weight
+/// that is never evicted and never shrinks. Measured at 781x468: 16 sources,
+/// 20.9 MB, against 0.11 MB of derived surfaces actually in use.
+///
+/// This changes no pixel. A miss re-reads the PNG, and the caller is expected
+/// to call it only when the layout has been still long enough that a miss is
+/// not imminent - see `Core::settle`. The source of truth is the file on
+/// disk, so this is a cache being returned to it, not state being lost.
+pub fn release_sources() -> usize {
+    BASE.with_borrow_mut(|base| {
+        let freed = base
+            .values()
+            .flatten()
+            .map(|s| (s.stride() as usize) * (s.height() as usize))
+            .sum();
+        // The `None` entries stay. They are the record that a sprite is NOT on
+        // disk, and dropping them would put a failed `open` back into every
+        // frame that asks for a missing asset.
+        base.retain(|_, v| v.is_none());
+        freed
+    })
+}
+
+/// How many sprite PNGs have been decoded since the process started. A caller
+/// deciding when the machine is still enough to release its sources watches
+/// this: while it moves, a source is still being asked for.
+pub fn load_count() -> u64 {
+    STATS.with_borrow(|st| st.loads)
 }
 
 // ---------------------------------------------------------------- 9-slice

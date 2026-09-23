@@ -41,6 +41,41 @@ pub const FPS_UNFOCUSED: f64 = 30.0;
 /// How long a selector key stays visibly depressed after a click, in seconds.
 pub const PRESS_FEEDBACK_S: f64 = 0.13;
 
+/// How long the machine must have gone without decoding a sprite before its
+/// full-resolution PNG sources are handed back.
+///
+/// The sources exist to RENDER the derived sizes; once a layout has settled,
+/// every frame blits the derived surface and the masters behind it are dead
+/// weight - measured at 781x468: 16 sources, 20.9 MB resident, against
+/// 0.11 MB of derived surfaces actually in use. Releasing them, and returning
+/// the arena they were pinning, takes PSS from 57.9 MB to 28.1 MB headless.
+///
+/// It is not free. The next layout change pays to decode them again: a resize
+/// frame goes from 56 ms (it already rebuilds both full-window layers) to
+/// 161 ms, once, at the start of a drag. Four seconds is long enough that a
+/// drag, a specimen sweep or a fullscreen toggle never pays it twice, and
+/// short enough that a window left alone gives the memory back promptly.
+pub const SETTLE_S: f64 = 4.0;
+
+/// glibc's "give the free pages back". Releasing the sprite sources frees
+/// blocks all over the arena; without this the arena keeps the pages and the
+/// process looks exactly as large as it did before. Measured: with the
+/// sources still held it is worth 0.9 MB, with them released, 10.7 MB.
+#[cfg(target_env = "gnu")]
+fn trim_heap() {
+    extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    // SAFETY: malloc_trim only returns already-free pages to the kernel. It
+    // touches no live allocation and has no effect other than on residency.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn trim_heap() {}
+
 /// The only things an input can ask of a host. Every semantic decision is
 /// taken inside `Core`; the host merely carries these out in its own idiom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +193,12 @@ pub struct Core {
 
     pub last_layout: Option<Layout>,
     pub last_vp: Option<Viewport>,
+
+    // --- residency ---
+    /// When the sprite sources may be released, or None when there is nothing
+    /// to release. See `SETTLE_S`.
+    settle_at: Option<f64>,
+    last_sprite_loads: u64,
 }
 
 impl Core {
@@ -224,6 +265,8 @@ impl Core {
             probe: probe_file,
             last_layout: None,
             last_vp: None,
+            settle_at: None,
+            last_sprite_loads: u64::MAX,
         }
     }
 
@@ -561,6 +604,34 @@ impl Core {
             frame_ms,
         );
         self.tel_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    }
+
+    /// Give the sprite sources back when the machine has stopped asking for
+    /// them. Called by the host from its idle path; costs one integer compare
+    /// per wakeup until it fires, and fires at most once per settling.
+    ///
+    /// The signal is the decode counter, not a timer on the layout: a region
+    /// rebuild can pull in a sprite the derived cache does not hold, and while
+    /// anything is still being decoded the machine is not settled. Returns the
+    /// bytes released, so a host can log or gate on it.
+    pub fn settle(&mut self, now_s: f64) -> usize {
+        let loads = crate::skin::surface::load_count();
+        if loads != self.last_sprite_loads {
+            self.last_sprite_loads = loads;
+            self.settle_at = Some(now_s + SETTLE_S);
+            return 0;
+        }
+        match self.settle_at {
+            Some(t) if now_s >= t => {
+                self.settle_at = None;
+                let freed = crate::skin::surface::release_sources();
+                if freed > 0 {
+                    trim_heap();
+                }
+                freed
+            }
+            _ => 0,
+        }
     }
 
     pub fn probe_sample(&mut self) {
@@ -1475,6 +1546,79 @@ mod paint_tests {
             }
         }
         hidpi::set_scale(1.0);
+    }
+
+    /// Releasing the sprite sources must change NO pixel. The whole case for
+    /// `Core::settle` is that the masters are a cache of what is on disk, so
+    /// a frame composed after they are handed back has to be byte-identical
+    /// to one composed while they were held - including after a layout change
+    /// forces every one of them to be decoded again.
+    #[test]
+    fn releasing_the_sprite_sources_changes_no_pixel() {
+        let (cache_ds, win_ds) = (1.5_f64, 1.5_f64);
+        crate::ui::fonts::ensure_user_fonts();
+        let shot = |release_first: bool, lw: f64, lh: f64| -> Vec<u8> {
+            let (pw, ph) = ((lw * win_ds) as i32, (lh * win_ds) as i32);
+            let t = Target {
+                logical_w: lw, logical_h: lh, phys_w: pw, phys_h: ph,
+                ds_x: pw as f64 / lw, ds_y: ph as f64 / lh, scale: win_ds,
+            };
+            let mut core = Core::new(Options {
+                width: lw as i32, height: lh as i32, ..Options::default()
+            });
+            let mut dev = DeviceLayers::new();
+            let buf = target(pw, ph, t.ds_x, t.ds_y);
+            {
+                let cr = Context::new(&buf).unwrap();
+                hidpi::set_scale(cache_ds);
+                // warm everything, then optionally hand the sources back and
+                // make the next frame decode them all over again
+                core.compose_frame(&cr, t, &mut dev);
+                if release_first {
+                    let freed = crate::skin::surface::release_sources();
+                    assert!(freed > 0, "nothing was resident to release");
+                }
+                core.compose_frame(&cr, t, &mut dev);
+            }
+            let mut copy = hidpi::copy_exclusive(&buf);
+            let v = copy.data().unwrap().to_vec();
+            v
+        };
+        for (lw, lh) in [(781.0_f64, 468.0_f64), (600.0, 520.0)] {
+            let held = shot(false, lw, lh);
+            let released = shot(true, lw, lh);
+            let diff = held.iter().zip(released.iter()).filter(|(a, b)| a != b).count();
+            assert_eq!(
+                diff, 0,
+                "{lw}x{lh}: {diff} of {} bytes differ after releasing the sprite sources",
+                held.len()
+            );
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// `settle` must not fire while sprites are still being decoded, and must
+    /// fire exactly once when they stop - not on every idle wakeup.
+    #[test]
+    fn settle_waits_for_the_machine_to_stop_asking_for_sprites() {
+        crate::ui::fonts::ensure_user_fonts();
+        let mut core = Core::new(Options { width: 781, height: 468, ..Options::default() });
+        let (pw, ph) = (781, 468);
+        let t = Target {
+            logical_w: 781.0, logical_h: 468.0, phys_w: pw, phys_h: ph,
+            ds_x: 1.0, ds_y: 1.0, scale: 1.0,
+        };
+        let mut dev = DeviceLayers::new();
+        let buf = target(pw, ph, 1.0, 1.0);
+        let cr = Context::new(&buf).unwrap();
+        hidpi::set_scale(1.0);
+        core.compose_frame(&cr, t, &mut dev);
+        // first look only arms the timer, however late the clock says it is
+        assert_eq!(core.settle(1000.0), 0, "settle fired on its first look");
+        assert_eq!(core.settle(1000.0 + SETTLE_S / 2.0), 0, "settle fired early");
+        let freed = core.settle(1000.0 + SETTLE_S);
+        assert!(freed > 0, "settle never released anything");
+        assert_eq!(core.settle(1000.0 + SETTLE_S * 3.0), 0, "settle fired twice");
     }
 
     /// A region must NOT pad: it is blitted with an unbounded `paint()`, so

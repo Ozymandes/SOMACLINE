@@ -2807,6 +2807,21 @@ impl Renderer {
         Some(Region { layer, rect: r })
     }
 
+    /// (count, bytes) held by the under, over and region caches, for the
+    /// ownership inventory. Reading a cache's size changes no output.
+    #[allow(clippy::type_complexity)]
+    pub fn layer_inventory(&self) -> ((usize, usize), (usize, usize), (usize, usize)) {
+        fn sum(v: &[(impl Sized, Layer)]) -> (usize, usize) {
+            (
+                v.len(),
+                v.iter()
+                    .map(|(_, l)| (l.surface.stride() as usize) * (l.surface.height() as usize))
+                    .sum(),
+            )
+        }
+        (sum(&self.under), sum(&self.over), sum(&self.regions))
+    }
+
     /// Drop derived surfaces. Purely a memory operation; changes no output.
     pub fn clear_static_cache(&mut self) {
         self.under.clear();
@@ -2816,4 +2831,39 @@ impl Renderer {
         RING_CACHE.with(|c| c.borrow_mut().clear());
         TRACE_CACHE.with(|c| c.borrow_mut().clear());
     }
+}
+
+// --------------------------------------------------------------------------
+// cache inventory
+// --------------------------------------------------------------------------
+//
+// The thread-local caches are private, so each reports its own size. These
+// read; they never change what is drawn.
+
+fn surf_bytes(s: &ImageSurface) -> usize {
+    (s.stride() as usize) * (s.height() as usize)
+}
+
+/// (entries, bytes) held by the shaped-text cache.
+pub fn text_cache_inventory() -> (usize, usize) {
+    TXT.with(|c| {
+        let c = c.borrow();
+        (c.len(), c.iter().map(|(_, (s, _, _, _))| surf_bytes(s)).sum())
+    })
+}
+
+/// (entries, bytes) held by the lamp/ring cache.
+pub fn ring_cache_inventory() -> (usize, usize) {
+    RING_CACHE.with(|c| {
+        let c = c.borrow();
+        (c.len(), c.iter().map(|(_, s)| surf_bytes(s)).sum())
+    })
+}
+
+/// (entries, bytes) held by the graph-trace cache.
+pub fn trace_cache_inventory() -> (usize, usize) {
+    TRACE_CACHE.with(|c| {
+        let c = c.borrow();
+        (c.len(), c.iter().map(|(_, s)| surf_bytes(s)).sum())
+    })
 }
