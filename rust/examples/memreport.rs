@@ -7,7 +7,7 @@
 //! layouts, so the report shows what a session ACCUMULATES rather than what a
 //! single steady window holds.
 
-use abyssal::host::{Core, DeviceLayers, Options, Target};
+use abyssal::host::{Core, DeviceLayers, Options, Target, SETTLE_S};
 
 extern "C" {
     fn malloc_trim(pad: usize) -> i32;
@@ -60,7 +60,7 @@ fn main() {
     };
     let mut dev = DeviceLayers::new();
 
-    let mut run = |core: &mut Core, dev: &mut DeviceLayers, w: f64, h: f64, n: usize| {
+    let run = |core: &mut Core, dev: &mut DeviceLayers, w: f64, h: f64, n: usize| {
         abyssal::skin::hidpi::set_scale(cache_ds);
         let (pw, ph) = ((w * target_ds).round() as i32, (h * target_ds).round() as i32);
         let surface = cairo::ImageSurface::create(cairo::Format::ARgb32, pw, ph).unwrap();
@@ -77,6 +77,16 @@ fn main() {
     };
 
     run(&mut core, &mut dev, w, h, num("--frames", 90.0) as usize);
+    if has("--settle") {
+        // two residency reviews, exactly as the host runs them
+        core.settle(1000.0);
+        core.settle(1000.0 + SETTLE_S);
+    }
+    if has("--settle") {
+        // two reviews, as the host would run them
+        core.settle(1000.0);
+        core.settle(1000.0 + SETTLE_S);
+    }
     if has("--resizes") {
         for (rw, rh) in [(600.0, 520.0), (1400.0, 880.0), (1000.0, 420.0)] {
             run(&mut core, &mut dev, rw, rh, 20);
@@ -94,7 +104,7 @@ fn main() {
 
     println!("{w}x{h} logical, cache ds {cache_ds} -> target ds {target_ds}\
               {}{}",
-             if has("--resizes") { ", after three other layouts" } else { "" },
+                      if has("--resizes") { ", after three other layouts" } else { "" },
              if has("--all-specimens") { ", after every specimen" } else { "" });
     println!();
     println!("  OWNER                          COUNT        MB   lifetime");
@@ -116,7 +126,7 @@ fn main() {
         println!("      {k:<22} {fw:>4} x {fh:<4}  {:>8.2}", mb(fw * fh * 4 * 3));
     }
     let ((bn, bb), (sn, sb)) = abyssal::skin::surface::cache_inventory();
-    println!("  sprite sources, full res    {:>7}  {:>8.2}   process (NEVER evicted)", bn, mb(bb));
+    println!("  sprite sources, full res    {:>7}  {:>8.2}   reviewed every SETTLE_S (second chance)", bn, mb(bb));
     for (k, sw, sh, b) in abyssal::skin::surface::base_cache_entries().iter().take(8) {
         println!("      {k:<22} {sw:>4} x {sh:<4}  {:>8.2}", mb(*b));
     }

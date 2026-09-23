@@ -41,8 +41,8 @@ pub const FPS_UNFOCUSED: f64 = 30.0;
 /// How long a selector key stays visibly depressed after a click, in seconds.
 pub const PRESS_FEEDBACK_S: f64 = 0.13;
 
-/// How long the machine must have gone without decoding a sprite before its
-/// full-resolution PNG sources are handed back.
+/// How often residency is reviewed, and therefore how long a source sprite
+/// nothing is asking for survives.
 ///
 /// The sources exist to RENDER the derived sizes; once a layout has settled,
 /// every frame blits the derived surface and the masters behind it are dead
@@ -195,10 +195,8 @@ pub struct Core {
     pub last_vp: Option<Viewport>,
 
     // --- residency ---
-    /// When the sprite sources may be released, or None when there is nothing
-    /// to release. See `SETTLE_S`.
+    /// When residency is next reviewed. See `SETTLE_S`.
     settle_at: Option<f64>,
-    last_sprite_loads: u64,
 }
 
 impl Core {
@@ -266,7 +264,6 @@ impl Core {
             last_layout: None,
             last_vp: None,
             settle_at: None,
-            last_sprite_loads: u64::MAX,
         }
     }
 
@@ -606,32 +603,28 @@ impl Core {
         self.tel_ms = t0.elapsed().as_secs_f64() * 1000.0;
     }
 
-    /// Give the sprite sources back when the machine has stopped asking for
-    /// them. Called by the host from its idle path; costs one integer compare
-    /// per wakeup until it fires, and fires at most once per settling.
+    /// Review sprite residency. Called by the host from its idle path; costs
+    /// one float compare per wakeup, and a scan of a sixteen-entry map every
+    /// `SETTLE_S`.
     ///
-    /// The signal is the decode counter, not a timer on the layout: a region
-    /// rebuild can pull in a sprite the derived cache does not hold, and while
-    /// anything is still being decoded the machine is not settled. Returns the
-    /// bytes released, so a host can log or gate on it.
+    /// The policy is second chance, not a flush - see
+    /// `skin::surface::release_unused_sources`. The first review after a
+    /// layout is built marks everything; the next one lets go of whatever has
+    /// not been asked for since. Returns the bytes released, so a host can log
+    /// or gate on it.
     pub fn settle(&mut self, now_s: f64) -> usize {
-        let loads = crate::skin::surface::load_count();
-        if loads != self.last_sprite_loads {
-            self.last_sprite_loads = loads;
-            self.settle_at = Some(now_s + SETTLE_S);
+        if now_s < self.settle_at.unwrap_or(0.0) {
             return 0;
         }
-        match self.settle_at {
-            Some(t) if now_s >= t => {
-                self.settle_at = None;
-                let freed = crate::skin::surface::release_sources();
-                if freed > 0 {
-                    trim_heap();
-                }
-                freed
-            }
-            _ => 0,
+        self.settle_at = Some(now_s + SETTLE_S);
+        let freed = crate::skin::surface::release_unused_sources();
+        if freed > 0 {
+            // Freeing surfaces from all over the arena is not the same as
+            // giving the pages back; without this the process stays exactly
+            // as large as it was.
+            trim_heap();
         }
+        freed
     }
 
     pub fn probe_sample(&mut self) {
@@ -1602,10 +1595,10 @@ mod paint_tests {
         hidpi::set_scale(1.0);
     }
 
-    /// `settle` must not fire while sprites are still being decoded, and must
-    /// fire exactly once when they stop - not on every idle wakeup.
+    /// The first review must only MARK, and the second must let go of what
+    /// has not been asked for since - and of nothing that has.
     #[test]
-    fn settle_waits_for_the_machine_to_stop_asking_for_sprites() {
+    fn settle_gives_back_only_what_nothing_asked_for() {
         crate::ui::fonts::ensure_user_fonts();
         let mut core = Core::new(Options { width: 781, height: 468, ..Options::default() });
         let (pw, ph) = (781, 468);
@@ -1617,13 +1610,30 @@ mod paint_tests {
         let buf = target(pw, ph, 1.0, 1.0);
         let cr = Context::new(&buf).unwrap();
         hidpi::set_scale(1.0);
+        crate::skin::surface::release_sources();
         core.compose_frame(&cr, t, &mut dev);
-        // first look only arms the timer, however late the clock says it is
-        assert_eq!(core.settle(1000.0), 0, "settle fired on its first look");
-        assert_eq!(core.settle(1000.0 + SETTLE_S / 2.0), 0, "settle fired early");
+        let ((n0, b0), _) = crate::skin::surface::cache_inventory();
+        assert!(n0 > 0 && b0 > 0, "a frame resident nothing: {n0} sources");
+
+        // first review marks; everything was just used, so nothing goes
+        assert_eq!(core.settle(1000.0), 0, "the first review let something go");
+        assert_eq!(core.settle(1000.0 + SETTLE_S / 2.0), 0, "a review fired early");
+        let ((n1, _), _) = crate::skin::surface::cache_inventory();
+        assert_eq!(n1, n0, "the first review dropped {} sources", n0 - n1);
+
+        // ask for exactly one of them again, then review: it stays, the rest go
+        let kept = crate::skin::surface::base_cache_entries()[0].0;
+        assert!(crate::skin::surface::sprite(kept).is_some());
         let freed = core.settle(1000.0 + SETTLE_S);
-        assert!(freed > 0, "settle never released anything");
-        assert_eq!(core.settle(1000.0 + SETTLE_S * 3.0), 0, "settle fired twice");
+        assert!(freed > 0, "the second review let nothing go");
+        let ((n2, b2), _) = crate::skin::surface::cache_inventory();
+        assert_eq!(n2, 1, "expected only the re-read source to survive, got {n2}");
+        assert!(b2 > 0);
+        assert_eq!(
+            crate::skin::surface::base_cache_entries()[0].0, kept,
+            "the review let go of the one source that was asked for"
+        );
+        crate::skin::surface::release_sources();
     }
 
     /// A region must NOT pad: it is blitted with an unbounded `paint()`, so
