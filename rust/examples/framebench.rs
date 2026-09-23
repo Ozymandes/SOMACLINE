@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use abyssal::host::{Core, DeviceLayers, Options, Target};
+use abyssal::host::{Core, DeviceLayers, Options, Painted, Target};
 
 fn main() {
     std::env::remove_var("CARGO_MANIFEST_DIR");
@@ -57,6 +57,21 @@ fn main() {
     let t = Instant::now();
     for _ in 0..n { core.compose_frame(&cr, target, &mut dev); }
     let whole = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+
+    // --- the damaged path, at the age softbuffer's double-buffered Wayland
+    // backend actually reports in steady state ---
+    let mut damaged_px = 0u64;
+    for _ in 0..8 { core.compose_damaged(&cr, target, &mut dev, 2); }
+    let t = Instant::now();
+    for _ in 0..n {
+        if let Painted::Rects(rs) = core.compose_damaged(&cr, target, &mut dev, 2) {
+            damaged_px += rs.iter().map(|r| r.w as u64 * r.h as u64).sum::<u64>();
+        } else {
+            damaged_px += pw as u64 * ph as u64;
+        }
+    }
+    let damaged = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
+    let damaged_px = damaged_px as f64 / n as f64;
     let t = Instant::now();
     for _ in 0..n { core.advance(1.0 / 60.0); }
     let sim = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
@@ -112,7 +127,10 @@ fn main() {
     };
 
     println!("{w}x{h} logical, cache ds {cache_ds} -> target ds {target_ds} ({pw}x{ph} device), n={n}");
-    println!("  compose_frame         {whole:7.3} ms      (simulation, separately: {sim:7.3} ms)");
+    println!("  compose_frame  whole  {whole:7.3} ms      (simulation, separately: {sim:7.3} ms)");
+    println!("  compose_damaged age 2 {damaged:7.3} ms      {damaged_px:.0} px/frame of {} ({:.1} %)",
+             pw as u64 * ph as u64,
+             damaged_px / (pw as f64 * ph as f64) * 100.0);
     println!("    of which black clear{clear:7.3} ms");
     println!("    of which organism   {organism:7.3} ms");
     println!("  device layer cache    {:7.2} MB", dev.bytes() as f64 / 1048576.0);

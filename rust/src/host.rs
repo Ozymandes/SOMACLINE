@@ -628,26 +628,136 @@ impl Target {
     }
 }
 
-/// The two full-window static layers, pre-resampled to the target's device
-/// resolution.
+/// A rectangle of the presentation buffer, in whole DEVICE pixels.
+///
+/// Damage is expressed in buffer pixels, and so is every repaint decision, so
+/// this is the one currency both sides of the seam understand. The matching
+/// LOGICAL rectangle is recovered by dividing by the target's device scale -
+/// exact, because the edges were snapped ONTO the device grid in the first
+/// place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceRect {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl DeviceRect {
+    pub fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    fn right(&self) -> u32 {
+        self.x + self.w
+    }
+
+    fn bottom(&self) -> u32 {
+        self.y + self.h
+    }
+
+    fn intersects(&self, o: &DeviceRect) -> bool {
+        !self.is_empty()
+            && !o.is_empty()
+            && self.x < o.right()
+            && o.x < self.right()
+            && self.y < o.bottom()
+            && o.y < self.bottom()
+    }
+
+    /// The smallest device-aligned rect that contains the LOGICAL rect `r`,
+    /// clamped to the buffer. Growing OUTWARD is what makes a partial repaint
+    /// seamless: a fractional logical edge would otherwise leave the pixel it
+    /// half-covers holding a blend of two different frames.
+    fn snap(r: Rect, t: &Target) -> DeviceRect {
+        if !(r.w > 0.0 && r.h > 0.0) {
+            return DeviceRect { x: 0, y: 0, w: 0, h: 0 };
+        }
+        let x0 = ((r.x * t.ds_x).floor()).clamp(0.0, t.phys_w as f64) as u32;
+        let y0 = ((r.y * t.ds_y).floor()).clamp(0.0, t.phys_h as f64) as u32;
+        let x1 = ((r.right() * t.ds_x).ceil()).clamp(0.0, t.phys_w as f64) as u32;
+        let y1 = ((r.bottom() * t.ds_y).ceil()).clamp(0.0, t.phys_h as f64) as u32;
+        DeviceRect { x: x0, y: y0, w: x1.saturating_sub(x0), h: y1.saturating_sub(y0) }
+    }
+
+    /// Back to LOGICAL coordinates. Exact by construction: the edges are
+    /// integers on the device grid, so `logical * ds` lands on them again and
+    /// cairo's rasteriser sees a pixel-aligned rectangle with no partial
+    /// coverage anywhere on its border.
+    fn logical(&self, t: &Target) -> Rect {
+        Rect::new(
+            self.x as f64 / t.ds_x,
+            self.y as f64 / t.ds_y,
+            self.w as f64 / t.ds_x,
+            self.h as f64 / t.ds_y,
+        )
+    }
+}
+
+/// What a frame actually wrote, and therefore what the host must damage.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Painted {
+    /// Every pixel of the buffer.
+    Whole,
+    /// Only these device rectangles; the rest of the buffer is untouched and
+    /// still holds the frame it held on entry.
+    Rects(Vec<DeviceRect>),
+}
+
+/// How many frames of dirty history are kept. Softbuffer's Wayland backend is
+/// double-buffered, so a returned buffer's age is 2 in steady state; anything
+/// older than this forces a whole frame, which is always correct.
+const DIRTY_HISTORY: usize = 4;
+
+/// The static picture, pre-composed at the target's device resolution, plus
+/// the dirty-rectangle bookkeeping that lets a frame repaint only what moved.
+///
+/// ## Why the static layers are composed once
 ///
 /// Under GTK this cache did not need to exist: GSK uploaded each cached layer
 /// once and the GPU resampled the 1.5-scale texture into the 1.6-scale window
 /// every frame for free. Cairo does that resample on the CPU, and measured at
-/// 781x468 / ds 1.6 it cost 2.05 ms per frame against 0.77 ms for an unscaled
-/// blit. Doing it ONCE per layer change restores GTK's economics.
+/// 781x468 / ds 1.6 it cost 0.98 ms (under) + 1.08 ms (over) per frame.
 ///
-/// It is bit-identical, not an approximation: the same cairo filter at the
-/// same scale, just not sixty times a second. Compositing a layer onto a
-/// transparent surface and then compositing that is exactly source-over
-/// associativity on premultiplied alpha.
+/// `base` goes one step further than caching the two resamples separately: it
+/// is the WHOLE static picture - opaque black, then `under`, then `over` - as
+/// one opaque device-resolution surface. A frame that needs the static
+/// backdrop restores it with a single 1:1 copy instead of a clear plus two
+/// full-window source-over composites.
 ///
-/// Cost: two ARGB32 surfaces at device resolution (7.5 MB at 1250x749).
+/// It is bit-identical, not an approximation. `base` is built by exactly the
+/// operations a frame used to perform, in the same order, into a surface of
+/// the same format and device scale; a 1:1 unscaled copy of the result is a
+/// byte copy. Source-over associativity on premultiplied alpha is what makes
+/// the resample step exact, and it is asserted byte for byte by
+/// `the_device_cache_is_bit_identical_to_resampling_every_frame`.
+///
+/// ## Why the glass is kept separately
+///
+/// The organism is sandwiched: `under`, organism, `over`. `base` has `over`
+/// already composited, so the glass cannot simply be drawn on top of it. The
+/// two crops hold the sandwich's bread at device resolution for the glass
+/// rectangle alone - measured at 14 % of the window - so the sandwich is
+/// rebuilt over that rectangle and nowhere else.
+///
+/// Cost: `base` (one full-window ARGB32) plus two glass-sized crops. At
+/// 1250x749 with a 372x349 glass that is 3.6 + 2 x 0.5 = 4.6 MB, against the
+/// 7.1 MB the two separate full-window device layers used to hold.
 #[derive(Default)]
 pub struct DeviceLayers {
-    key: Option<(u64, u64, i32, i32)>,
-    under: Option<cairo::ImageSurface>,
-    over: Option<cairo::ImageSurface>,
+    key: Option<(u64, u64, i32, i32, u64, u64)>,
+    /// opaque black + `under` + `over`, at the target's device resolution
+    base: Option<cairo::ImageSurface>,
+    /// opaque black + `under`, cropped to `glass`
+    glass_base: Option<cairo::ImageSurface>,
+    /// `over` alone, cropped to `glass`
+    glass_over: Option<cairo::ImageSurface>,
+    /// the glass, snapped outward onto the device grid
+    glass: DeviceRect,
+    /// what each of the last `DIRTY_HISTORY` frames changed, newest last
+    dirty: std::collections::VecDeque<Vec<DeviceRect>>,
+    /// (region layer id, rect) as of the previous frame, to spot changes
+    last_regions: Vec<(u64, DeviceRect)>,
 }
 
 impl DeviceLayers {
@@ -657,22 +767,21 @@ impl DeviceLayers {
 
     /// Bytes currently held, for the record.
     pub fn bytes(&self) -> usize {
-        [&self.under, &self.over]
+        [&self.base, &self.glass_base, &self.glass_over]
             .iter()
             .filter_map(|s| s.as_ref())
             .map(|s| (s.stride() as usize) * (s.height() as usize))
             .sum()
     }
 
-    /// True when a layer is ALREADY at the target's device resolution, which
-    /// is the whole-number-scale case (and the headless one). Then there is
-    /// nothing to resample and nothing to cache: the original blits 1:1.
-    fn is_native(src: &Layer, t: &Target) -> bool {
-        let (dx, dy) = src.surface.device_scale();
-        src.surface.width() == t.phys_w
-            && src.surface.height() == t.phys_h
-            && (dx - t.ds_x).abs() < 1e-9
-            && (dy - t.ds_y).abs() < 1e-9
+    /// Forget every frame-to-frame assumption. The next frame will be whole.
+    ///
+    /// The host calls this whenever the presentation buffer's history cannot
+    /// be trusted - after a resize, or when softbuffer reports an age it has
+    /// no dirty record for.
+    pub fn forget_history(&mut self) {
+        self.dirty.clear();
+        self.last_regions.clear();
     }
 
     fn resample(src: &Layer, t: &Target) -> Option<cairo::ImageSurface> {
@@ -686,30 +795,90 @@ impl DeviceLayers {
         Some(dst)
     }
 
-    /// Rebuild only when a layer's identity or the buffer size changes.
-    /// A `Layer` id is stable for the lifetime of its pixels, so this is
-    /// exact: content changes produce a new id.
-    fn prepare(&mut self, under: Option<&Layer>, over: Option<&Layer>, t: &Target) {
+    /// An exact 1:1 copy of `r` out of `src`. Both surfaces carry the target's
+    /// device scale and the rect is device-aligned, so the pattern transform
+    /// is an integer translation and the copy is a byte copy.
+    fn crop(src: &cairo::ImageSurface, r: DeviceRect, t: &Target) -> Option<cairo::ImageSurface> {
+        if r.is_empty() {
+            return None;
+        }
+        let dst = cairo::ImageSurface::create(cairo::Format::ARgb32, r.w as i32, r.h as i32).ok()?;
+        dst.set_device_scale(t.ds_x, t.ds_y);
+        {
+            let lr = r.logical(t);
+            let cr = Context::new(&dst).ok()?;
+            cr.set_operator(cairo::Operator::Source);
+            cr.set_source_surface(src, -lr.x, -lr.y).ok()?;
+            cr.paint().ok()?;
+        }
+        dst.flush();
+        Some(dst)
+    }
+
+    /// Rebuild only when a layer's identity, the buffer size or the glass
+    /// changes. A `Layer` id is stable for the lifetime of its pixels, so this
+    /// is exact: a content change produces a new id.
+    ///
+    /// Returns true when anything was rebuilt, which invalidates every
+    /// frame-to-frame assumption the caller may have held.
+    fn prepare(
+        &mut self,
+        under: Option<&Layer>,
+        over: Option<&Layer>,
+        t: &Target,
+        glass: Rect,
+    ) -> bool {
+        let g = DeviceRect::snap(glass, t);
         let key = (
             under.map(|l| l.id).unwrap_or(0),
             over.map(|l| l.id).unwrap_or(0),
             t.phys_w,
             t.phys_h,
+            ((g.x as u64) << 32) | g.y as u64,
+            ((g.w as u64) << 32) | g.h as u64,
         );
         if self.key == Some(key) {
-            return;
+            return false;
         }
-        self.under = under
-            .filter(|l| !Self::is_native(l, t))
-            .and_then(|l| Self::resample(l, t));
-        self.over = over
-            .filter(|l| !Self::is_native(l, t))
-            .and_then(|l| Self::resample(l, t));
+        self.glass = g;
+        self.base = None;
+        self.glass_base = None;
+        self.glass_over = None;
+
+        // black + under, full window. This IS the frame's first two steps.
+        let built = (|| -> Option<cairo::ImageSurface> {
+            let base =
+                cairo::ImageSurface::create(cairo::Format::ARgb32, t.phys_w, t.phys_h).ok()?;
+            base.set_device_scale(t.ds_x, t.ds_y);
+            {
+                let cr = Context::new(&base).ok()?;
+                cr.set_operator(cairo::Operator::Source);
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.paint().ok()?;
+                cr.set_operator(cairo::Operator::Over);
+                paint_layer(&cr, under, 0.0, 0.0, true);
+            }
+            base.flush();
+            // the glass's bread, taken before `over` lands on it
+            self.glass_base = Self::crop(&base, g, t);
+            // `over`, resampled once: bit-identical to painting it per frame
+            if let Some(o) = over {
+                let dev_over = Self::resample(o, t)?;
+                self.glass_over = Self::crop(&dev_over, g, t);
+                let cr = Context::new(&base).ok()?;
+                Self::blit(&cr, Some(&dev_over));
+            }
+            base.flush();
+            Some(base)
+        })();
+        self.base = built;
         self.key = Some(key);
+        self.forget_history();
+        true
     }
 
-    /// Blit a prepared layer. Its device scale equals the target's, so cairo
-    /// takes the unscaled path.
+    /// Blit a prepared surface 1:1. Its device scale equals the target's, so
+    /// cairo takes the unscaled path.
     fn blit(cr: &Context, surf: Option<&cairo::ImageSurface>) {
         let Some(s) = surf else { return };
         if cr.set_source_surface(s, 0.0, 0.0).is_err() {
@@ -717,18 +886,93 @@ impl DeviceLayers {
         }
         let _ = cr.paint();
     }
+
+    /// Restore the static backdrop over exactly `r`, replacing whatever the
+    /// buffer held there. `Operator::Source` because `base` is opaque and the
+    /// old contents must not show through.
+    fn restore(cr: &Context, base: Option<&cairo::ImageSurface>, r: DeviceRect, t: &Target) {
+        let Some(base) = base else { return };
+        if r.is_empty() {
+            return;
+        }
+        let lr = r.logical(t);
+        let _ = cr.save();
+        cr.rectangle(lr.x, lr.y, lr.w, lr.h);
+        cr.clip();
+        cr.set_operator(cairo::Operator::Source);
+        if cr.set_source_surface(base, 0.0, 0.0).is_ok() {
+            let _ = cr.paint();
+        }
+        let _ = cr.restore();
+    }
+
+    /// The union of the dirty sets of the last `age` frames, plus `now`.
+    ///
+    /// A buffer of age `n` holds the frame from `n` frames ago, so everything
+    /// that has changed since then has to be repainted into it. Returns None
+    /// when the history cannot cover that reach and the whole frame is owed.
+    fn repaint_set(&self, age: u8, now: &[DeviceRect]) -> Option<Vec<DeviceRect>> {
+        if age == 0 {
+            return None;
+        }
+        let back = age as usize - 1; // frames before this one that must be redone
+        if back > self.dirty.len() {
+            return None;
+        }
+        let mut out: Vec<DeviceRect> = now.to_vec();
+        for set in self.dirty.iter().rev().take(back) {
+            for r in set {
+                if !out.contains(r) {
+                    out.push(*r);
+                }
+            }
+        }
+        out.retain(|r| !r.is_empty());
+        Some(out)
+    }
+
+    fn remember(&mut self, now: Vec<DeviceRect>, regions: Vec<(u64, DeviceRect)>) {
+        self.dirty.push_back(now);
+        while self.dirty.len() > DIRTY_HISTORY {
+            self.dirty.pop_front();
+        }
+        self.last_regions = regions;
+    }
 }
 
 impl Core {
     /// Compose one whole frame into `cr`, in LOGICAL coordinates.
     ///
-    /// The caller has already set `skin::hidpi::set_scale()` and given the
-    /// target its device scale; this function is the same four-layer sequence
-    /// the GTK host feeds to GSK, drawn with cairo instead.
+    /// The headless entry point and the one every parity harness drives:
+    /// every pixel is written, exactly as it always was.
     pub fn compose_frame(&mut self, cr: &Context, t: Target, dev: &mut DeviceLayers) {
+        self.compose_damaged(cr, t, dev, 0);
+    }
+
+    /// Compose one frame, writing only what has changed since the frame this
+    /// buffer already holds.
+    ///
+    /// `age` is softbuffer's: the number of frames ago this buffer was last
+    /// presented, and 0 when its contents are undefined. At `age == 0` this is
+    /// `compose_frame` and returns `Painted::Whole`; otherwise it restores the
+    /// static backdrop over the dirty rectangles only, redraws the organism
+    /// and any region that lands in them, and returns exactly the rectangles
+    /// it touched for the host to pass to `present_with_damage`.
+    ///
+    /// The sequence inside a repainted rectangle is the same four-layer
+    /// sequence a whole frame uses - black, `under`, organism, `over`,
+    /// regions - so the result is bit-identical to a whole frame. That is
+    /// asserted by `a_damaged_frame_is_bit_identical_to_a_whole_one`.
+    pub fn compose_damaged(
+        &mut self,
+        cr: &Context,
+        t: Target,
+        dev: &mut DeviceLayers,
+        age: u8,
+    ) -> Painted {
         let (width, height) = (t.logical_w, t.logical_h);
         if width < 1.0 || height < 1.0 {
-            return;
+            return Painted::Whole;
         }
         let t0 = Instant::now();
         let (layout, glass, vp) = self.frame_geometry(width, height);
@@ -739,56 +983,9 @@ impl Core {
         let over = self
             .renderer
             .layer_over(&layout, &self.model, &self.telemetry);
-        dev.prepare(under.as_ref(), over.as_ref(), &t);
-
-        // Scrub the buffer to OPAQUE black. Two jobs: a presentation buffer
-        // comes back with undefined contents (it may be a different one each
-        // frame), and the frame must end fully opaque because softbuffer
-        // discards the alpha byte - a premultiplied pixel with a < 255 would
-        // otherwise present darkened. The `under` layer is NOT fully opaque
-        // at every layout (measured: opaque at 600x520 and 1400x880, not at
-        // 781x468), so this is load-bearing, not belt-and-braces.
-        let _ = cr.save();
-        cr.set_operator(cairo::Operator::Source);
-        cr.set_source_rgb(0.0, 0.0, 0.0);
-        let _ = cr.paint();
-        let _ = cr.restore();
-
-        match dev.under.as_ref() {
-            Some(s) => DeviceLayers::blit(cr, Some(s)),
-            None => paint_layer(cr, under.as_ref(), 0.0, 0.0, true),
-        }
-
-        // LAYER 2: the organism - the only per-frame raster, glass only
-        if glass.valid() {
-            let _ = cr.save();
-            cr.rectangle(glass.x, glass.y, glass.w, glass.h);
-            cr.clip();
-            let Core {
-                organisms,
-                species_index,
-                rcaches,
-                show_calibration,
-                ..
-            } = self;
-            let org = organisms[*species_index].as_ref().unwrap();
-            render::draw_organism(cr, &vp, org, rcaches);
-            if *show_calibration {
-                render::draw_calibration(cr, &vp, org);
-            }
-            let _ = cr.restore();
-        }
-
-        match dev.over.as_ref() {
-            Some(s) => DeviceLayers::blit(cr, Some(s)),
-            None => paint_layer(cr, over.as_ref(), 0.0, 0.0, true),
-        }
+        let rebuilt = dev.prepare(under.as_ref(), over.as_ref(), &t, glass);
 
         // LAYERS 4-6: live regions, each re-rendered only on its own change.
-        // These keep the per-frame resample: they move (their logical origin
-        // lands on a fractional device pixel at a fractional scale), they are
-        // small, and most change several times a second, so a device-side
-        // copy would be rebuilt almost as often as it was used.
         let regions = self.renderer.regions(
             &layout,
             &self.model,
@@ -798,11 +995,121 @@ impl Core {
             under.as_ref(),
             over.as_ref(),
         );
-        for reg in &regions {
-            if !reg.rect.valid() {
-                continue;
+        let placed: Vec<(u64, DeviceRect)> = regions
+            .iter()
+            .filter(|r| r.rect.valid())
+            .map(|r| (r.layer.id, DeviceRect::snap(r.rect, &t)))
+            .collect();
+
+        // What changed since the previous frame: the glass always (the
+        // organism moves), plus any region whose surface is not the one that
+        // was there last time, plus the footprint a region has just left.
+        let mut now: Vec<DeviceRect> = Vec::new();
+        if !dev.glass.is_empty() {
+            now.push(dev.glass);
+        }
+        for (id, r) in &placed {
+            if !dev.last_regions.contains(&(*id, *r)) && !now.contains(r) {
+                now.push(*r);
             }
-            paint_layer(cr, Some(&reg.layer), reg.rect.x, reg.rect.y, false);
+        }
+        for (id, r) in &dev.last_regions {
+            if !placed.contains(&(*id, *r)) && !now.contains(r) {
+                now.push(*r);
+            }
+        }
+
+        // The debug overlay is drawn free-hand across the window, so it has no
+        // rectangle to damage; it forces whole frames and costs what it costs.
+        let whole = rebuilt || self.show_debug || dev.base.is_none();
+        let repaint = if whole { None } else { dev.repaint_set(age, &now) };
+
+        match &repaint {
+            // ---- whole frame -------------------------------------------
+            // One opaque 1:1 copy in place of a clear plus two full-window
+            // source-over composites. `base` is opaque, so Operator::Source
+            // is safe and the undefined contents of a fresh buffer cannot
+            // show through - the job the black scrub used to do.
+            None => {
+                let _ = cr.save();
+                cr.set_operator(cairo::Operator::Source);
+                match dev.base.as_ref() {
+                    Some(b) => DeviceLayers::blit(cr, Some(b)),
+                    None => {
+                        cr.set_source_rgb(0.0, 0.0, 0.0);
+                        let _ = cr.paint();
+                    }
+                }
+                let _ = cr.restore();
+            }
+            // ---- partial frame -----------------------------------------
+            Some(rects) => {
+                for r in rects {
+                    if *r == dev.glass {
+                        continue; // the glass gets its own sandwich below
+                    }
+                    DeviceLayers::restore(cr, dev.base.as_ref(), *r, &t);
+                }
+            }
+        }
+
+        // LAYER 2: the organism - the only per-frame raster, glass only.
+        // Its bread is laid down again first, because `base` already has
+        // `over` composited and the organism belongs underneath it.
+        if glass.valid() && !dev.glass.is_empty() {
+            let gl = dev.glass.logical(&t);
+            let _ = cr.save();
+            cr.rectangle(gl.x, gl.y, gl.w, gl.h);
+            cr.clip();
+            if repaint.is_some() || dev.glass_base.is_some() {
+                let _ = cr.save();
+                cr.set_operator(cairo::Operator::Source);
+                if let Some(gb) = dev.glass_base.as_ref() {
+                    if cr.set_source_surface(gb, gl.x, gl.y).is_ok() {
+                        let _ = cr.paint();
+                    }
+                }
+                let _ = cr.restore();
+            }
+            {
+                let _ = cr.save();
+                cr.rectangle(glass.x, glass.y, glass.w, glass.h);
+                cr.clip();
+                let Core {
+                    organisms,
+                    species_index,
+                    rcaches,
+                    show_calibration,
+                    ..
+                } = self;
+                let org = organisms[*species_index].as_ref().unwrap();
+                render::draw_organism(cr, &vp, org, rcaches);
+                if *show_calibration {
+                    render::draw_calibration(cr, &vp, org);
+                }
+                let _ = cr.restore();
+            }
+            if let Some(go) = dev.glass_over.as_ref() {
+                if cr.set_source_surface(go, gl.x, gl.y).is_ok() {
+                    let _ = cr.paint();
+                }
+            }
+            let _ = cr.restore();
+        }
+
+        // Regions sit on top of the static picture, so any region whose
+        // rectangle was restored has to be laid down again even if its own
+        // pixels did not change.
+        for (reg, (_, dr)) in regions.iter().zip(placed.iter()) {
+            let touched = match &repaint {
+                None => true,
+                Some(rects) => {
+                    rects.iter().any(|r| r.intersects(dr)) || dr.intersects(&dev.glass)
+                }
+            };
+            if touched {
+                paint_layer(cr, Some(&reg.layer), reg.rect.x, reg.rect.y, false);
+            }
         }
 
         self.draw_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -815,6 +1122,17 @@ impl Core {
         self.tick_fps();
         self.last_layout = Some(layout);
         self.last_vp = Some(vp);
+
+        match repaint {
+            None => {
+                dev.remember(now, placed);
+                Painted::Whole
+            }
+            Some(rects) => {
+                dev.remember(now, placed);
+                Painted::Rects(rects)
+            }
+        }
     }
 }
 
@@ -950,6 +1268,211 @@ mod paint_tests {
                  the device cache is NOT bit-identical",
                 a.len()
             );
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// The pre-composed `base` must be BIT-IDENTICAL to the clear-plus-two-
+    /// full-window-composites sequence it replaced. The whole saving rests on
+    /// that: if compositing `under` and `over` into an opaque surface once and
+    /// copying it were merely *close* to doing it every frame, every parity
+    /// number in the docs would be describing a frame the app no longer draws.
+    ///
+    /// Driven at the fractional scale, where the layers are resampled, and at
+    /// whole scales, where they are not.
+    #[test]
+    fn the_precomposed_base_is_bit_identical_to_composing_every_frame() {
+        for (cache_ds, win_ds) in [(1.5_f64, 1.6_f64), (1.5, 1.0), (1.0, 1.0), (2.0, 2.0)] {
+            let (lw, lh) = (240.0_f64, 150.0_f64);
+            let under = probe_layer(cache_ds, lw, lh);
+            hidpi::set_scale(cache_ds);
+            // an `over` layer with real translucency, so the composite is not
+            // trivially the top one
+            let over = {
+                let surf = hidpi::surface(lw, lh);
+                {
+                    let cr = Context::new(&surf).unwrap();
+                    cr.set_source_rgba(0.9, 0.8, 0.1, 0.4);
+                    cr.rectangle(10.0, 10.0, lw - 20.0, 40.0);
+                    cr.fill().unwrap();
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 1.0);
+                    cr.rectangle(0.0, lh - 6.0, lw, 6.0);
+                    cr.fill().unwrap();
+                }
+                surf.flush();
+                Layer { id: 2, surface: surf }
+            };
+            let (pw, ph) = ((lw * win_ds) as i32, (lh * win_ds) as i32);
+            let t = Target {
+                logical_w: lw, logical_h: lh, phys_w: pw, phys_h: ph,
+                ds_x: pw as f64 / lw, ds_y: ph as f64 / lh, scale: win_ds,
+            };
+
+            // (a) the sequence a frame used to run, every frame
+            let direct = target(pw, ph, t.ds_x, t.ds_y);
+            {
+                let cr = Context::new(&direct).unwrap();
+                cr.set_operator(cairo::Operator::Source);
+                cr.set_source_rgb(0.0, 0.0, 0.0);
+                cr.paint().unwrap();
+                cr.set_operator(cairo::Operator::Over);
+                paint_layer(&cr, Some(&under), 0.0, 0.0, true);
+                paint_layer(&cr, Some(&over), 0.0, 0.0, true);
+            }
+            // (b) composed once into `base`, then copied 1:1
+            let cached = target(pw, ph, t.ds_x, t.ds_y);
+            {
+                let mut dev = DeviceLayers::new();
+                assert!(dev.prepare(Some(&under), Some(&over), &t, Rect::NONE));
+                let cr = Context::new(&cached).unwrap();
+                cr.set_operator(cairo::Operator::Source);
+                DeviceLayers::blit(&cr, dev.base.as_ref());
+            }
+            let mut direct = hidpi::copy_exclusive(&direct);
+            let mut cached = hidpi::copy_exclusive(&cached);
+            let (a, b) = (direct.data().unwrap(), cached.data().unwrap());
+            let diff = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+            assert_eq!(
+                diff, 0,
+                "cache {cache_ds} -> window {win_ds}: {diff} of {} bytes differ - \
+                 the pre-composed base is NOT bit-identical",
+                a.len()
+            );
+            // and it must be fully opaque, or softbuffer presents it darkened
+            assert!(
+                b.chunks_exact(4).all(|p| p[3] == 255),
+                "cache {cache_ds} -> window {win_ds}: base is not fully opaque"
+            );
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// The whole point of the damage path: a frame composed by repainting
+    /// only the dirty rectangles must be BIT-IDENTICAL to one composed from
+    /// scratch. Not close - identical. If it ever drifts, the window is
+    /// showing a frame no parity harness has ever looked at.
+    ///
+    /// Driven through the real `Core`, at the real fractional scale, over
+    /// enough frames for the organism to move, the clock to be issued and the
+    /// region cache to turn over. Two buffers are carried in lock-step: one
+    /// always composed whole, one composed damaged with a truthful age, and
+    /// every frame is compared byte for byte.
+    #[test]
+    fn a_damaged_frame_is_bit_identical_to_a_whole_one() {
+        for (cache_ds, win_ds) in [(1.5_f64, 1.6_f64), (1.0, 1.0), (2.0, 2.0), (1.25, 1.25)] {
+            let (lw, lh) = (781.0_f64, 468.0_f64);
+            let (pw, ph) = ((lw * win_ds).round() as i32, (lh * win_ds).round() as i32);
+            let t = Target {
+                logical_w: lw,
+                logical_h: lh,
+                phys_w: pw,
+                phys_h: ph,
+                ds_x: pw as f64 / lw,
+                ds_y: ph as f64 / lh,
+                scale: win_ds,
+            };
+            crate::ui::fonts::ensure_user_fonts();
+            let opts = Options { width: lw as i32, height: lh as i32, ..Options::default() };
+            let mut whole_core = Core::new(opts.clone());
+            let mut dirty_core = Core::new(opts);
+            let mut whole_dev = DeviceLayers::new();
+            let mut dirty_dev = DeviceLayers::new();
+            let whole_buf = target(pw, ph, t.ds_x, t.ds_y);
+            let dirty_buf = target(pw, ph, t.ds_x, t.ds_y);
+            let whole_cr = Context::new(&whole_buf).unwrap();
+            let dirty_cr = Context::new(&dirty_buf).unwrap();
+
+            // A truthful double-buffered age: the damaged frame is composed
+            // into ONE buffer here, so after the first frame it is always
+            // looking at the frame it drew one frame ago.
+            for frame in 0..24 {
+                hidpi::set_scale(cache_ds);
+                whole_core.advance(1.0 / 60.0);
+                dirty_core.advance(1.0 / 60.0);
+                let painted =
+                    dirty_core.compose_damaged(&dirty_cr, t, &mut dirty_dev,
+                                               if frame == 0 { 0 } else { 1 });
+                whole_core.compose_frame(&whole_cr, t, &mut whole_dev);
+                if frame == 0 {
+                    assert_eq!(painted, Painted::Whole, "frame 0 must be whole");
+                } else if frame > 2 {
+                    assert!(matches!(painted, Painted::Rects(_)),
+                            "cache {cache_ds} -> {win_ds}: frame {frame} never went partial");
+                }
+                whole_buf.flush();
+                dirty_buf.flush();
+                // an exclusive copy: the live Context still holds a reference
+                // to the buffer itself, and cairo refuses a data lend then
+                let mut a = hidpi::copy_exclusive(&whole_buf);
+                let mut b = hidpi::copy_exclusive(&dirty_buf);
+                let (da, db) = (a.data().unwrap(), b.data().unwrap());
+                let diff = da.iter().zip(db.iter()).filter(|(x, y)| x != y).count();
+                assert_eq!(
+                    diff, 0,
+                    "cache {cache_ds} -> window {win_ds}, frame {frame}: {diff} of {} \
+                     bytes differ - the damaged frame is NOT bit-identical",
+                    da.len()
+                );
+            }
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// A partial frame must damage EVERY pixel it changed and no pixel it did
+    /// not. Under-damaging leaves the compositor showing a stale rectangle;
+    /// over-damaging is merely wasteful. This drives a buffer of age 2 - what
+    /// softbuffer's double-buffered Wayland backend actually reports - against
+    /// a reference that is whole every frame, and checks that every byte the
+    /// reference changed two frames running falls inside the reported rects.
+    #[test]
+    fn damage_covers_every_pixel_a_partial_frame_changed() {
+        let (cache_ds, win_ds) = (1.5_f64, 1.6_f64);
+        let (lw, lh) = (781.0_f64, 468.0_f64);
+        let (pw, ph) = ((lw * win_ds).round() as i32, (lh * win_ds).round() as i32);
+        let t = Target {
+            logical_w: lw, logical_h: lh, phys_w: pw, phys_h: ph,
+            ds_x: pw as f64 / lw, ds_y: ph as f64 / lh, scale: win_ds,
+        };
+        crate::ui::fonts::ensure_user_fonts();
+        let opts = Options { width: lw as i32, height: lh as i32, ..Options::default() };
+        let mut core = Core::new(opts);
+        let mut dev = DeviceLayers::new();
+        // two alternating buffers, exactly as softbuffer pools them
+        let bufs = [target(pw, ph, t.ds_x, t.ds_y), target(pw, ph, t.ds_x, t.ds_y)];
+        let mut prev: Option<Vec<u8>> = None;
+        for frame in 0..24 {
+            hidpi::set_scale(cache_ds);
+            core.advance(1.0 / 60.0);
+            let buf = &bufs[frame % 2];
+            let cr = Context::new(buf).unwrap();
+            // age 0 for the first use of each buffer, then a true 2
+            let age = if frame < 2 { 0 } else { 2 };
+            let painted = core.compose_damaged(&cr, t, &mut dev, age);
+            buf.flush();
+            let mut copy = hidpi::copy_exclusive(buf);
+            let cur = copy.data().unwrap().to_vec();
+            if let (Some(p), Painted::Rects(rects)) = (prev.as_ref(), &painted) {
+                let stride = copy.stride() as usize;
+                for y in 0..ph as usize {
+                    for x in 0..pw as usize {
+                        let o = y * stride + x * 4;
+                        if p[o..o + 4] == cur[o..o + 4] {
+                            continue;
+                        }
+                        let inside = rects.iter().any(|r| {
+                            x >= r.x as usize && x < r.right() as usize
+                                && y >= r.y as usize && y < r.bottom() as usize
+                        });
+                        assert!(inside,
+                            "frame {frame}: device pixel {x},{y} changed but is outside \
+                             every damage rect {rects:?}");
+                    }
+                }
+            }
+            // the reference for the NEXT use of this same buffer
+            if frame % 2 == 1 {
+                prev = Some(cur);
+            }
         }
         hidpi::set_scale(1.0);
     }

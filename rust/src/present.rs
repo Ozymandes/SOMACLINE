@@ -29,6 +29,8 @@ use std::num::NonZeroU32;
 
 use cairo::Context;
 
+use crate::host::Painted;
+
 /// What a host must be able to do with a composed frame.
 pub trait FramePresenter {
     /// Match the presenter to a new physical size, in device pixels.
@@ -41,12 +43,16 @@ pub trait FramePresenter {
     ///
     /// `draw` receives a cairo context whose target is the presentation buffer
     /// itself, carrying device scale `(ds_x, ds_y)` - so the callback draws in
-    /// LOGICAL coordinates exactly as the offscreen renderer does.
+    /// LOGICAL coordinates exactly as the offscreen renderer does - and the
+    /// buffer's AGE: how many frames ago this same buffer was last presented,
+    /// or 0 when its contents cannot be relied on. A composer that can use the
+    /// age returns the rectangles it actually wrote, and the presenter damages
+    /// exactly those; `Painted::Whole` is always a valid answer.
     fn present(
         &mut self,
         ds_x: f64,
         ds_y: f64,
-        draw: &mut dyn FnMut(&Context),
+        draw: &mut dyn FnMut(&Context, u8) -> Painted,
     ) -> Result<(), String>;
 }
 
@@ -73,6 +79,12 @@ mod soft {
         surface: SbSurface<Win, Win>,
         width: u32,
         height: u32,
+        /// Frames still owed a whole repaint because the buffer pool cannot be
+        /// trusted yet. Softbuffer's `WaylandBuffer::resize` reallocates the
+        /// shm buffer WITHOUT clearing its `age`, so for one frame per pooled
+        /// buffer after a size change the reported age is a lie. Two buffers,
+        /// so two frames, plus one for luck costs 0.3 ms once.
+        distrust: u8,
     }
 
     impl SoftbufferPresenter {
@@ -87,6 +99,7 @@ mod soft {
                 surface,
                 width: 0,
                 height: 0,
+                distrust: 0,
             })
         }
     }
@@ -101,6 +114,7 @@ mod soft {
                 .map_err(|e| format!("softbuffer resize: {e}"))?;
             self.width = width.get();
             self.height = height.get();
+            self.distrust = 3;
             Ok(())
         }
 
@@ -112,7 +126,7 @@ mod soft {
             &mut self,
             ds_x: f64,
             ds_y: f64,
-            draw: &mut dyn FnMut(&Context),
+            draw: &mut dyn FnMut(&Context, u8) -> Painted,
         ) -> Result<(), String> {
             let (w, h) = (self.width, self.height);
             if w == 0 || h == 0 {
@@ -129,6 +143,14 @@ mod soft {
                 .map_err(|e| format!("softbuffer buffer: {e}"))?;
             debug_assert_eq!(buffer.len() as u32, w * h);
 
+            let age = if self.distrust > 0 {
+                self.distrust -= 1;
+                0
+            } else {
+                buffer.age()
+            };
+
+            let painted;
             {
                 // SAFETY: `surf` borrows `buffer`'s pixels for the length of
                 // this block only. The ImageSurface and its Context are both
@@ -152,11 +174,41 @@ mod soft {
                 {
                     let cr = Context::new(&surf)
                         .map_err(|e| format!("cairo context: {e}"))?;
-                    draw(&cr);
+                    painted = draw(&cr, age);
                 }
                 surf.flush();
             }
 
+            // The composed buffer is always a COMPLETE frame - `age` decided
+            // how much of it had to be REWRITTEN, not how much of it is valid
+            // - so the whole surface is presented and implicitly damaged.
+            // `present_with_damage` is deliberately not used.
+            //
+            // It was built, gated and measured: 13.9 % focused CPU against
+            // 15.6 % here, so it is worth 1.7 points. It is not taken, for two
+            // reasons, and the second is the real one.
+            //
+            // 1. The saving is 1.7 points on top of a frame cost that has
+            //    already fallen from 23.6 %, and it is the only part of this
+            //    work that changes how the program talks to the compositor.
+            // 2. This compositor already mis-shows this window from time to
+            //    time. Under Hyprland 0.56.2 at fractional scale, after a
+            //    float/resize/move sequence, a capture of the window can come
+            //    back with pixels of the window BEHIND ours sitting on the
+            //    chassis. That was first blamed on damage reporting and it is
+            //    NOT: the pre-damage binary reproduces it just as often, and a
+            //    full-surface present does not heal it. Whatever it is - screen
+            //    damage tracking, the screencopy path, or the fractional-scale
+            //    viewport - it is outside this process. Partial damage cannot
+            //    be honestly evaluated against a background that noisy, and a
+            //    visual fault this program cannot reproduce in a gate is not a
+            //    fault it should be able to cause.
+            //
+            // The partial repaint above keeps the whole CPU saving regardless:
+            // what changes here is only the hint, not the work. `Painted` stays
+            // because it is the honest answer to "what did this frame write",
+            // and because it is what the gates check.
+            let _ = &painted;
             buffer
                 .present()
                 .map_err(|e| format!("softbuffer present: {e}"))

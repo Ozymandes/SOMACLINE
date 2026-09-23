@@ -243,8 +243,8 @@ impl App {
         let target = m.target();
         // Tell the compositor a frame is coming, so it can time its own.
         window.pre_present_notify();
-        let res = presenter.present(m.ds_x, m.ds_y, &mut |cr| {
-            core.compose_frame(cr, target, dev);
+        let res = presenter.present(m.ds_x, m.ds_y, &mut |cr, age| {
+            core.compose_damaged(cr, target, dev, age)
         });
         if let Err(e) = res {
             eprintln!("abyssal: {e}");
@@ -302,6 +302,14 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.sync_metrics();
+                self.request_frame();
+            }
+            // The compositor may show a surface it has not been given a new
+            // frame for, so nothing about the previous frame survives being
+            // uncovered: start again from a whole one.
+            WindowEvent::Occluded(false) => {
+                self.occluded = false;
+                self.dev.forget_history();
                 self.request_frame();
             }
             WindowEvent::Focused(f) => self.focused = f,
