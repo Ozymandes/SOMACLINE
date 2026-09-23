@@ -1088,6 +1088,27 @@ impl Core {
         let whole = rebuilt || self.show_debug || dev.base.is_none();
         let repaint = if whole { None } else { dev.repaint_set(age, &now) };
 
+        // `now` is this frame's DIRTY set - what changed since the frame
+        // before it - and the history of those sets is what a buffer of age
+        // `k` is brought up to date with. When the static picture itself
+        // changes, EVERY pixel changed, and recording only the glass and the
+        // regions is a lie the next frame pays for.
+        //
+        // It is paid one frame later, in the other pooled buffer. Selecting a
+        // specimen rebuilds the `over` layer, so the name engraved in the
+        // header changes; that frame is composed whole and looks right. The
+        // next frame takes the other buffer, whose age is 2, so it holds the
+        // frame BEFORE the switch - the old name - and repaints only what the
+        // (understated) history claims changed. The old name survives. The
+        // result alternates old, new, old, new at the refresh rate: a label
+        // that flickers violently between two specimens while every single
+        // screenshot of it looks correct.
+        let now = if whole {
+            vec![DeviceRect { x: 0, y: 0, w: t.phys_w.max(0) as u32, h: t.phys_h.max(0) as u32 }]
+        } else {
+            now
+        };
+
         match &repaint {
             // ---- whole frame -------------------------------------------
             // One opaque 1:1 copy in place of a clear plus two full-window
@@ -1331,6 +1352,79 @@ mod paint_tests {
                 "cache {cache_ds} -> window {win_ds}: {diff} of {} bytes differ - \
                  the device cache is NOT bit-identical",
                 a.len()
+            );
+        }
+        hidpi::set_scale(1.0);
+    }
+
+    /// Switching specimen rebuilds the static picture, and the OTHER pooled
+    /// buffer still holds the frame from before the switch. If the frame that
+    /// rebuilt only records the glass and the regions as its dirty set, the
+    /// next frame repaints only those into a buffer carrying the old header,
+    /// and the engraved specimen name alternates old, new, old, new at the
+    /// refresh rate - violent flicker that no single screenshot can catch.
+    ///
+    /// This drives two alternating buffers at the age softbuffer really
+    /// reports, switches specimen in the middle, and requires every frame to
+    /// be byte-identical to a whole one. It FAILS without the whole-buffer
+    /// dirty record.
+    #[test]
+    fn switching_specimen_does_not_leave_the_old_chrome_in_the_other_buffer() {
+        let (cache_ds, win_ds) = (1.5_f64, 1.6_f64);
+        let (lw, lh) = (781.0_f64, 468.0_f64);
+        let (pw, ph) = ((lw * win_ds).round() as i32, (lh * win_ds).round() as i32);
+        let t = Target {
+            logical_w: lw, logical_h: lh, phys_w: pw, phys_h: ph,
+            ds_x: pw as f64 / lw, ds_y: ph as f64 / lh, scale: win_ds,
+        };
+        crate::ui::fonts::ensure_user_fonts();
+        console::pin_clock("04:17:33");
+        let opts = Options { width: lw as i32, height: lh as i32, ..Options::default() };
+        let mut core = Core::new(opts.clone());
+        let mut ref_core = Core::new(opts);
+        let mut dev = DeviceLayers::new();
+        let mut ref_dev = DeviceLayers::new();
+        // the pool: two buffers, alternating, exactly as softbuffer holds them
+        let bufs = [target(pw, ph, t.ds_x, t.ds_y), target(pw, ph, t.ds_x, t.ds_y)];
+        let refbuf = target(pw, ph, t.ds_x, t.ds_y);
+        let refcr = Context::new(&refbuf).unwrap();
+
+        for frame in 0..20 {
+            hidpi::set_scale(cache_ds);
+            // switch specimen part way through, then switch back
+            if frame == 6 {
+                core.select_specimen(2, false);
+                ref_core.select_specimen(2, false);
+            }
+            if frame == 12 {
+                core.select_specimen(0, false);
+                ref_core.select_specimen(0, false);
+            }
+            core.advance(1.0 / 60.0);
+            ref_core.advance(1.0 / 60.0);
+            // `fps` is wall-clock instrumentation that feeds the rack region's
+            // cache key; pin it on both so the comparison is about composition
+            // and nothing else.
+            for c in [&mut core, &mut ref_core] {
+                c.fps = 60.0;
+                c.frame_ms = 1000.0 / 60.0;
+            }
+            let cr = Context::new(&bufs[frame % 2]).unwrap();
+            let age = if frame < 2 { 0 } else { 2 };
+            core.compose_damaged(&cr, t, &mut dev, age);
+            ref_core.compose_frame(&refcr, t, &mut ref_dev);
+            drop(cr);
+            bufs[frame % 2].flush();
+            refbuf.flush();
+            let mut a = hidpi::copy_exclusive(&bufs[frame % 2]);
+            let mut b = hidpi::copy_exclusive(&refbuf);
+            let (da, db) = (a.data().unwrap(), b.data().unwrap());
+            let diff = da.iter().zip(db.iter()).filter(|(x, y)| x != y).count();
+            assert_eq!(
+                diff, 0,
+                "frame {frame} (specimen {}): {diff} of {} bytes differ from a whole \
+                 frame - stale chrome survived in the pooled buffer",
+                core.species_index, da.len()
             );
         }
         hidpi::set_scale(1.0);
