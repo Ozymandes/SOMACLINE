@@ -1,166 +1,240 @@
+<div align="center">
+
 # ABYSSAL ORGANISM MONITOR
 
-A biocomputational observation console for Linux. Five procedural specimens
-live behind its glass, each a different set of point equations, and their
-physiology responds to real machine telemetry.
+**A biocomputational observation console for Linux.**
+Five procedural specimens live behind its glass. Their physiology is your machine's.
 
-The console is manufactured from six generated hardware modules - shell,
-header, observation chamber, telemetry rack, selector, status rail - matched
-to `references/Abbysal_Final.png` and decomposed per
-`references/Abbysal_Module_Map.png`. The modules are the metal; everything
-that changes is drawn live, in code, into a recess measured off the module.
-Nothing on the machine is a baked reading.
+<img src="docs/shots/instrument.png" alt="The console in its INSTRUMENT layout" width="860">
+
+`Rust` · `winit + softbuffer` · `cairo + pango` · `no GPU` · `no GTK` · `2 threads` · `~46 MB`
+
+</div>
+
+---
+
+## What it is
+
+A fictional laboratory instrument that monitors specimens that do not exist,
+using telemetry that does.
+
+The console is manufactured from six generated hardware modules — shell,
+header, observation chamber, telemetry rack, selector, status rail. The modules
+are the metal. Everything that changes is drawn live, in code, into recesses
+measured off the module: the seven-segment readouts, the sixty-second graphs,
+the lamps, the engraved specimen keys, the clock. **Nothing on the machine is a
+baked reading.**
+
+Behind the glass, a specimen. Each one is a published generative sketch — a
+compact p5.js program — ported verbatim, first to NumPy and then to Rust. The
+equation on the screen is the equation in the source. At rest every specimen
+reduces *exactly* to its published form; a parity gate asserts it.
+
+Then the machine reads `/proc` and `/sys`, and the specimen responds. CPU load
+becomes a ripple travelling down the body. Thermal pressure breaks a mirror
+plane, or warms a pulse from cyan toward amber. Memory pressure crowds the
+field. Physiology shapes the creature. It never replaces it.
 
 ## The catalogue
 
-Each specimen is a published generative sketch — a compact p5.js program —
-ported verbatim to NumPy. The equation on screen is the equation in the
-source; see `docs/CREATURE_EQUATIONS.md`.
+| # | Specimen | Form | Your machine reads as |
+|---|---|---|---|
+| 01 | **PLUMARIA SIGMATA** | a sigmoid plume | a ripple down the body |
+| 02 | **DIPLOSOMA CONIUGATA** | two coupled bodies | I/O crossing between them |
+| 03 | **SYMMETRA ROSTRATA** | a mirrored alien | heat breaking the mirror plane |
+| 04 | **QUADRIPLUMA ARTICULATA** | four separate plumes | load desynchronising the four |
+| 05 | **PENNARIA SOLITARIA** | a single feather | a whip growing toward the tip |
 
-| # | Specimen | Source | Form | Telemetry reads as |
-|---|---|---|---|---|
-| 01 | PLUMARIA SIGMATA | s01 | sigmoid plume | a ripple down the body |
-| 02 | DIPLOSOMA CONIUGATA | s02 | two coupled bodies | I/O crossing between them |
-| 03 | SYMMETRA ROSTRATA | s03 | mirrored alien | heat breaking the mirror plane |
-| 04 | QUADRIPLUMA ARTICULATA | s04 | four separate plumes | load desynchronising the four |
-| 05 | PENNARIA SOLITARIA | s05 | single feather | a whip growing toward the tip |
+<div align="center">
+<img src="docs/shots/specimen-01.png" alt="Specimen 01" width="420">
+<img src="docs/shots/specimen-03.png" alt="Specimen 03" width="420">
+</div>
 
-At rest every specimen reduces **exactly** to its published equation;
-`qa/console_gates.py` GATE 4 asserts it. Physiology shapes the creature, it
-never replaces it.
+## Features
 
-## Requirements
+- **Five specimens**, each a faithful port of its source equation, selectable
+  from the engraved keys or the keyboard.
+- **Live physiology** from real CPU, thermal, memory and I/O telemetry,
+  sampled at 5 Hz, with every graph showing the last sixty seconds.
+- **Three responsive layouts** — COMPACT, INSTRUMENT, ARCHIVE — that rebuild
+  nothing when the window resizes.
+- **Fractional display scaling**, gated at 1.0, 1.25, 1.5, 1.6, 1.75 and 2.0.
+- **Adaptive frame cadence**: 60 FPS focused, 30 visible but unfocused, and
+  nothing at all when the compositor stops asking — measured at 0.12 % of one
+  core on another workspace.
+- **Tiny.** ~46 MB resident, two threads, forty shared objects, no GPU driver
+  loaded, and a window on screen 0.21 s after launch.
 
-Arch / Omarchy (or any distro with these):
+## Screenshots
+
+| | |
+|---|---|
+| ![COMPACT](docs/shots/compact.png) | ![ARCHIVE](docs/shots/archive.png) |
+| **COMPACT** — the specimen and a condensed readout | **ARCHIVE** — the full six-module machine |
+| ![Telemetry rack](docs/shots/closeup-telemetry.png) | ![Selector](docs/shots/closeup-selector.png) |
+| **The rack** — segment readouts and 60 s graphs, drawn per frame | **The bank** — five engraved keys, mode and cycle |
+
+## Install
+
+Requires cairo, pango and fontconfig — all of which a desktop Linux system
+already has. Building needs a Rust toolchain. Developed and verified on
+Wayland (Hyprland); winit's X11 backend is compiled in but untested here.
 
 ```sh
-sudo pacman -S --needed python gtk4 python-gobject python-cairo python-numpy
+git clone <this repository>
+cd abyssal-organism-monitor
+./install.sh                       # builds, installs into ~/.local
 ```
 
-Everything else is stdlib. No virtualenv needed, no build step, no
-third-party Python packages. Telemetry reads `/proc` and `/sys` directly.
-
-## Run
+That gives you `abyssal-monitor` on your `PATH`, a desktop entry and an icon.
 
 ```sh
-./run.sh                         # 900x700, the canonical tile
-./run.sh --debug                 # with the diagnostic overlay on
-./run.sh --width 1400 --height 860
-./run.sh --qa-temp 86             # QA: substitute the temperature reading
-./run.sh --fps-cap 30             # QA: force a draw rate (default adaptive)
+./install.sh --prefix /usr/local   # system-wide
+./install.sh --uninstall           # take it back out
+DESTDIR=/tmp/pkg ./install.sh --prefix /usr    # stage for a package
 ```
 
-The monitor draws at up to 60 FPS while focused, 30 while visible but
-unfocused, and not at all on another workspace. Telemetry is sampled at 5 Hz;
-every graph shows the last 60 seconds.
+On Arch and derivatives the runtime dependencies are:
+
+```sh
+sudo pacman -S --needed cairo pango fontconfig
+```
+
+To run from a checkout without installing anything:
+
+```sh
+./run-rust-winit.sh                # builds on demand, runs in place
+```
+
+## Usage
+
+```sh
+abyssal-monitor                              # 900x700
+abyssal-monitor --width 1400 --height 880    # ARCHIVE
+abyssal-monitor --specimen 2                 # open on a specimen (0-4)
+abyssal-monitor --debug                      # with the diagnostic overlay
+```
+
+### Controls
 
 | key | |
 |---|---|
-| `1`–`5` | select a specimen (or click its engraved key) |
-| `←` `→` | previous / next specimen |
-| `m` | cycle the mode key |
-| `F1` | diagnostic overlay (size, scale, viewport, FPS, sim clock) |
-| `F2` | calibration geometry — circles and quadrant spokes |
-| `F`  | toggle fullscreen |
-| `Q` / `Esc` | quit |
+| <kbd>1</kbd>–<kbd>5</kbd> | select a specimen — or click its engraved key |
+| <kbd>←</kbd> <kbd>→</kbd> <kbd>↑</kbd> <kbd>↓</kbd>, <kbd>n</kbd> <kbd>p</kbd> | previous / next specimen |
+| <kbd>m</kbd> | cycle the mode key |
+| <kbd>F1</kbd> | diagnostic overlay — size, scale, viewport, FPS, sim clock |
+| <kbd>F2</kbd> | calibration geometry — world circles and quadrant spokes |
+| <kbd>F11</kbd> | fullscreen |
+| <kbd>q</kbd> / <kbd>Esc</kbd> | quit |
 
-## Test
+## How it is built
+
+```
+  telemetry  /proc, /sys, 5 Hz ──▶ physiology ──▶ specimen equations
+                                                        │
+  six hardware modules ──▶ static layers ──┐             │
+                                           ▼             ▼
+                              one opaque composed base   organism raster
+                                           └──────┬──────┘
+                                                  ▼
+                                      dirty-region composition
+                                                  ▼
+                              cairo ──▶ shared-memory buffer ──▶ compositor
+```
+
+The renderer knows nothing about windows. It produces a frame in logical
+coordinates; a `FramePresenter` — three methods, no framework — puts it on a
+screen. That seam is why the same machine runs unchanged on two hosts: the
+GTK4 build kept as a reference oracle, and this one.
+
+There is no GPU in the path. Cairo composes straight into the compositor's
+shared-memory buffer, so the frame is copied exactly once — by softbuffer,
+when it hands the buffer over.
+
+Three scales are in play and confusing any two of them is a whole bug class:
+the window's scale factor, the quantised cache scale every cached surface is
+rendered at, and the target's exact per-axis device scale. They are reconciled
+in one function, gated at six scales.
+
+**Read next:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the resize
+contract and the composition model, and
+[`docs/rust-migration/OPTIMIZATION.md`](docs/rust-migration/OPTIMIZATION.md)
+for where every byte and every microsecond went.
+
+## Performance
+
+781×468 logical on a 1.6-scale display (1250×749 device), INSTRUMENT, one
+core. The GTK4 column is the same renderer on the same machine.
+
+| | Python + GTK4 | Rust + GTK4 | **this release** |
+|---|---:|---:|---:|
+| PSS | 222.0 MB | 184.9 MB | **44.6 – 47.8 MB** |
+| RSS | 238.4 MB | 194.7 MB | **53.6 – 56.5 MB** |
+| CPU, focused | 21.2 % | 17.5 % | **15.1 – 16.0 %** |
+| CPU, unfocused | 13.3 % | 10.7 % | **9.5 %** |
+| CPU, off-workspace | 1.3 % | 0.50 % | **0.12 %** |
+| threads | 26 | 11 | **2** |
+| shared objects | — | 113 | **40** |
+| startup to mapped window | — | 0.51 s | **0.21 s** |
+
+GTK composited two full-window layers on the GPU, outside the process, for
+free. This build does that work on the CPU and still uses less of it, because
+it stopped doing most of it: the static picture is composed once, and a frame
+repaints the glass and whatever region actually changed — measured at 15.8 %
+of the buffer.
+
+Every optimisation is gated by a byte-for-byte comparison against a frame
+composed the straightforward way. None of them is allowed to be an
+approximation.
+
+## On making it
+
+The console was built against two fixed references: a target image and a
+module map. The hardware was generated, then cut into a nine-sliceable sprite
+set by `tools/build_sprites.py`; the generation log — every prompt, setting
+and reference — is in `assets/modules/GENERATIONS.md`.
+
+It was written twice. The Python + GTK4 implementation came first and still
+lives in `abyssal/`; it is not a second product but the **parity oracle**. The
+Rust port is diffed against it at six size/scale/layout fixtures, and the only
+region that exceeds tolerance is the header clock, which is wall time — two
+runs of the *reference itself* differ there by more.
+
+That oracle is why the optimisation work could be aggressive. When a frame can
+be proved byte-identical to a frame drawn the obvious way, the obvious way
+stops being the only safe one.
+
+## Development
 
 ```sh
-python3 qa/gates.py              # GATE 1 geometry + GATE 3 performance
-python3 qa/console_gates.py      # GATES 4-8 species, skin, selector, cache
-python3 qa/production_gates.py   # P1-P12 six-module assets, alpha, seating, cadence
-python3 qa/compare.py OUT        # side-by-side + module deltas vs the reference
-python3 qa/perf_live.py          # real CPU / RSS / FPS, focused/unfocused/hidden
-python3 qa/shots.py              # real-window screenshots (docs/shots)
-python3 qa/torture.py --shots    # GATE 0: real Hyprland resize torture test
-python3 qa/offscreen.py out.png --width 1400 --height 880
-python3 qa/specimen_sheet.py catalogue.png
-python3 qa/creature_validate.py  # each equation in its own 400x400 canvas
-python3 -m abyssal.telemetry.source      # live telemetry
+cd rust
+cargo test --no-default-features --features winit-host   # 49 gates
+cargo test                                               # the GTK reference, 46
+
+cargo run --release --example framebench -- --width 781 --height 468 \
+    --cache-ds 1.5 --target-ds 1.6        # where a frame's time goes
+cargo run --release --example memreport   # where every resident byte is
 ```
 
-`qa/torture.py` drives the real window through tile / resize / fullscreen /
-float / retile cycles on a scratch workspace and then asserts, from the app's
-own probe log, that the simulation never reset, nothing was rebuilt, geometry
-stayed isotropic and nothing clipped.
-
-## Layout
-
-```
-abyssal/
-  app.py              host: window, frame loop, input, probe
-  core/
-    world.py          the 1000x1000 logical world
-    viewport.py       the ONLY world -> pixel transform
-    layout.py         responsive states (COMPACT / INSTRUMENT / ARCHIVE)
-    signals.py        Telemetry and Physiology value types
-    physiology.py     Telemetry -> Physiology, smoothed
-    lighting.py       restrained spill from lit displays
-    theme.py          palette and type
-  organism/
-    sources.py        the five source equations, verbatim + NumPy port
-    mathforms.py      specimens: source clock, world seat, physiology
-    pointfield.py     accumulating point-field rasteriser
-    species.py        the catalogue: source + archive metadata
-    render.py         cairo drawing of any specimen
-  telemetry/
-    source.py         /proc and /sys sampling, with graceful fallback
-    history.py        bounded 60 s rings for the graphs
-  skin/
-    modules.py        THE SIX MODULES: bays, stretch bands, fasteners
-    hidpi.py          device-scale surfaces for every cache
-    surface.py        sprite loading, 9-slice, bounded surface cache
-    catalog.py        approved parts: keys, lamps, rocker, mode key
-    fascia.py         earlier bay-mapped panels (compact fallbacks)
-  ui/
-    console.py        the six modules + live content; static layers, regions
-    selector.py       the five engraved specimen keys
-    segment.py        procedural seven-segment display, with units
-    chrome.py         text primitives and the background
-    debug.py          F1 diagnostic overlay
-qa/
-  gates.py            headless geometry and performance gates
-  console_gates.py    species, skin, selector, switching, static layer
-  offscreen.py        headless single-frame capture
-  specimen_sheet.py   the catalogue as one contact sheet
-  torture.py          Hyprland resize torture harness
-  shots.py            product screenshots from the real app
-tools/
-  build_modules.py    masters -> runtime modules (alpha, crop, trueing)
-  module_qa.py        alpha / aperture / recess measurement of one PNG
-assets/modules/
-  masters/            the six accepted 2K generations (source of truth)
-  GENERATIONS.md      every Higgsfield generation, settings, references
-  INVENTORY.md        the six modules: size, alpha, apertures, seating
-docs/
-  ARCHITECTURE.md     why this stack, the resize contract, composition
-  VALIDATION.md       measured results
-  shots/              real-window screenshots + reference comparison
-```
-
-See `docs/ARCHITECTURE.md` for the resize contract and why the stack was
-chosen.
-
-## Notes for Omarchy / Hyprland
-
-**Window translucency.** Omarchy applies `opacity = "0.985 0.96"` to every
-window (`/usr/share/omarchy/default/hypr/windows.lua`). Against a near-black
-app the wallpaper shows faintly through. That is the desktop's setting, not
-this app. To make the abyss truly opaque, add to your Hyprland config:
-
-```lua
-o.window("dev.abyssal.OrganismMonitor", { tag = "-default-opacity", opacity = "1 1" })
-```
-
-**hyprctl is Lua here.** Hyprland 0.56 on Omarchy fronts `hyprctl dispatch`
-(and the IPC socket) with a Lua dispatcher API. The classic string form is a
-syntax error:
+Parity against the reference, at a real device scale:
 
 ```sh
-hyprctl dispatch resizeactive exact 900 700                      # FAILS
-hyprctl dispatch "hl.dsp.window.resize({ x = 900, y = 700, exact = true })"   # works
+python3 qa/offscreen.py /tmp/py.png --width 900 --height 700 --ds 1.5
+cargo run --release --example compose -- /tmp/rs.png --width 900 --height 700 --ds 1.5
+python3 qa/imgdiff.py /tmp/rs.png /tmp/py.png
 ```
 
-`qa/torture.py` documents the forms it needs (`hl.dsp.window.float`,
-`.fullscreen`, `.resize` with `relative = true`, `hl.dsp.focus`).
+`docs/ASSETS.md` records what ships and what is source material.
+
+## Licence
+
+**Not yet settled — see [`LICENSING.md`](LICENSING.md) before republishing.**
+There is no licence file, and the two bundled display typefaces have no stated
+provenance. Both need a decision from a human.
+
+## Acknowledgements
+
+The five specimens are ports of published generative sketches; each source is
+reproduced verbatim alongside its port in `rust/src/sources.rs`. The hardware
+skin was generated with an image model against a fixed reference, and the
+provenance of every module is logged in `assets/modules/GENERATIONS.md`.
