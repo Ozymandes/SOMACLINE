@@ -1,33 +1,29 @@
-//! The two display faces, installed where fontconfig can find them.
-//! Port of ui/fonts.py.
+//! Optional display faces, registered if the operator has supplied them.
 //!
-//! The console's hero type is set in Astro (major titles) and its technical
-//! support type in Microgramma (labels, rails, microcopy). Both ship in
-//! assets/fonts/; Pango resolves families through fontconfig, so the faces
-//! have to exist in a scanned font directory before the first Pango font map
-//! is built. Everything is idempotent and fails soft: if the copy or the
-//! cache refresh is impossible the console still runs, on its mono fallback.
+//! The instrument's hero type is Astro and its technical support type is
+//! Microgramma. **Neither is distributed with this program.** They are
+//! third-party faces and Somacline has no redistribution rights to them, so
+//! `assets/fonts/` is empty in the repository and nothing font-shaped is ever
+//! installed by the packaging.
+//!
+//! What this module does is narrow: if the operator has put those files into
+//! `assets/fonts/` themselves, it copies them into their own font directory
+//! and refreshes the cache, so Pango can resolve the families. Files the
+//! operator supplied, moved on the operator's own machine - not redistribution.
+//!
+//! If the files are absent, this does nothing at all and the instrument runs
+//! on fontconfig's substitutions. That is the normal case and it is supported:
+//! the layout is metric-driven, so the machine composes correctly whatever the
+//! faces resolve to. It just is not wearing its own typography.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 const FONTS: [&str; 2] = ["astro.ttf", "microgrammanormal.ttf"];
 
-/// Candidate locations of the repo's assets/fonts directory.
+/// Candidate locations of the assets/fonts directory.
 fn font_sources() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        // crate lives in <repo>/rust
-        v.push(Path::new(&manifest).join("../assets/fonts"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        // <repo>/rust/target/release/abyssal -> <repo>
-        for up in ["../../../assets/fonts", "../../../../assets/fonts"] {
-            v.push(exe.parent().unwrap_or(Path::new(".")).join(up));
-        }
-    }
-    v.push(PathBuf::from("assets/fonts"));
-    v
+    crate::skin::asset_roots("fonts")
 }
 
 fn digest_eq(src: &Path, dst: &Path) -> bool {
@@ -37,7 +33,8 @@ fn digest_eq(src: &Path, dst: &Path) -> bool {
     }
 }
 
-/// Install the bundled faces into the user font directory, once per process.
+/// Register the optional faces, once per process. A no-op when they are not
+/// present, which is the default state of a fresh checkout.
 pub fn ensure_user_fonts() {
     thread_local! {
         static DONE: Cell<bool> = const { Cell::new(false) };
@@ -48,7 +45,7 @@ pub fn ensure_user_fonts() {
     DONE.with(|d| d.set(true));
 
     let Some(home) = std::env::var_os("HOME") else { return };
-    let dst_dir = PathBuf::from(home).join(".local/share/fonts/abyssal");
+    let dst_dir = PathBuf::from(home).join(".local/share/fonts/somacline");
     let Ok(_) = std::fs::create_dir_all(&dst_dir) else { return };
     let mut changed = false;
     for src_dir in font_sources() {

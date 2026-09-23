@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Somacline
+GenericName=Computational Morphology Instrument
+Comment=Five mathematical organisms whose physiology is driven by live machine telemetry
+Exec=somacline
+TryExec=somacline
+Icon=dev.somacline.Somacline
+Terminal=false
+Categories=Science;Education;Monitor;Graphics;
+Keywords=morphology;telemetry;monitor;generative;organism;instrument;
+StartupNotify=true
+StartupWMClass=dev.somacline.Somacline

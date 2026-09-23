@@ -12,3 +12,16 @@ assets/hardware_v2/*/
 # Rejected / superseded module generations: kept on disk, out of git.
 assets/modules/rejected/
 rust/target/
+
+# Cargo build output. `rust/target/` was ignored; the framework-floor probe's
+# own target/ was not, and 720.8 MB of compiled rlibs across 1338 files had
+# been committed. Untracked in the release audit; the probe SOURCE stays.
+rust/floor/target/
+
+# Optional display typefaces. NOT redistributed: Astro and Microgramma are
+# third-party faces the project does not have redistribution rights to, so
+# they are never committed and never installed. Drop them in here yourself and
+# the app will register them for its own process; without them it falls back.
+# See README "Optional typography".
+assets/fonts/*.ttf
+assets/fonts/*.otf

@@ -35,17 +35,7 @@ pub const MIN_MIDDLE_SHARE: f64 = 0.34;
 pub const MIN_BORDER_SCALE: f64 = 0.45;
 
 fn sprite_roots() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
-        v.push(PathBuf::from(manifest).join("../assets/sprites"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        for up in ["../../../assets/sprites", "../../../../assets/sprites"] {
-            v.push(exe.parent().unwrap_or(std::path::Path::new(".")).join(up));
-        }
-    }
-    v.push(PathBuf::from("assets/sprites"));
-    v
+    crate::skin::asset_roots("sprites")
 }
 
 #[derive(Clone)]
@@ -56,8 +46,17 @@ struct CacheStats {
     missing: u64,
 }
 
+/// A decoded source sprite, and whether anything has asked for it since the
+/// last time residency was reviewed.
+struct Source {
+    surf: ImageSurface,
+    used: bool,
+}
+
 thread_local! {
-    static BASE: std::cell::RefCell<HashMap<&'static str, Option<ImageSurface>>> =
+    /// `None` records that a sprite is NOT on disk, so a missing asset does
+    /// not get a failed `open` back in every frame that wants it.
+    static BASE: std::cell::RefCell<HashMap<&'static str, Option<Source>>> =
         std::cell::RefCell::new(HashMap::new());
     static SCALED: std::cell::RefCell<IndexedLru> = std::cell::RefCell::new(IndexedLru::new());
     static STATS: std::cell::RefCell<CacheStats> = std::cell::RefCell::new(CacheStats {
@@ -122,6 +121,42 @@ impl IndexedLru {
     }
 }
 
+/// (sprites, bytes) held by the full-resolution source cache, and the same
+/// for the derived-size LRU. Reading a cache's size changes no output.
+pub fn cache_inventory() -> ((usize, usize), (usize, usize)) {
+    fn bytes(s: &ImageSurface) -> usize {
+        (s.stride() as usize) * (s.height() as usize)
+    }
+    let base = BASE.with_borrow(|m| {
+        (
+            m.values().flatten().count(),
+            m.values().flatten().map(|e| bytes(&e.surf)).sum(),
+        )
+    });
+    let scaled = SCALED.with_borrow(|l| (l.map.len(), l.map.values().map(bytes).sum()));
+    (base, scaled)
+}
+
+/// The largest source sprites resident, biggest first, for the inventory.
+pub fn base_cache_entries() -> Vec<(&'static str, i32, i32, usize)> {
+    let mut v: Vec<_> = BASE.with_borrow(|m| {
+        m.iter()
+            .filter_map(|(k, v)| {
+                v.as_ref().map(|e| {
+                    (
+                        *k,
+                        e.surf.width(),
+                        e.surf.height(),
+                        (e.surf.stride() as usize) * (e.surf.height() as usize),
+                    )
+                })
+            })
+            .collect()
+    });
+    v.sort_by_key(|e| std::cmp::Reverse(e.3));
+    v
+}
+
 // --------------------------------------------------------------------- load
 // (asset-root cache)
 thread_local! {
@@ -147,8 +182,12 @@ pub fn sprite(name: &'static str) -> Option<ImageSurface> {
     });
 
     BASE.with_borrow_mut(|base| {
-        if let Some(hit) = base.get(name) {
-            return hit.clone();
+        if let Some(hit) = base.get_mut(name) {
+            if let Some(src) = hit {
+                src.used = true;
+                return Some(src.surf.clone());
+            }
+            return None;
         }
         let path = resolved.join(format!("{name}.png"));
         let surf = std::fs::File::open(&path)
@@ -161,7 +200,7 @@ pub fn sprite(name: &'static str) -> Option<ImageSurface> {
                 st.missing += 1;
             }
         });
-        base.insert(name, surf.clone());
+        base.insert(name, surf.clone().map(|s| Source { surf: s, used: true }));
         surf
     })
 }
@@ -218,13 +257,68 @@ pub fn skin_stats() -> SkinStats {
         misses: st.misses,
         missing: st.missing,
         cached: SCALED.with_borrow(|s| s.len()),
-        loaded: BASE.with_borrow(|b| b.values().filter(|v| v.is_some()).count()),
+        loaded: BASE.with_borrow(|b| b.values().flatten().count()),
     })
 }
 
 pub fn clear_cache() {
     SCALED.with_borrow_mut(|s| s.clear());
 }
+
+/// Hand back the source sprites nothing has asked for since the last review,
+/// keeping every derived surface. Returns the bytes released.
+///
+/// A source sprite exists to be RENDERED INTO a derived size. Once a layout
+/// has settled, what every frame blits is the `SCALED` entry, and the masters
+/// behind it - `module/shell` is 1600x1172, 7.15 MB - are dead weight that is
+/// never evicted and never shrinks. Measured at 781x468: 16 sources, 20.9 MB
+/// resident, against 0.11 MB of derived surfaces actually in use.
+///
+/// It is a SECOND-CHANCE policy, not a flush, because a few sprites are drawn
+/// straight from their source every time rather than through the derived
+/// cache - the header fascia and the small lamps, traced live. Flushing those
+/// too just makes the next second decode them again: measured as a 2.5 MB
+/// sawtooth every 4 s, with a PNG decode inside a frame each time. A sprite
+/// read since the last review keeps its place; one that was not is let go.
+///
+/// This changes no pixel. A miss re-reads the PNG, and the file on disk is
+/// the source of truth, so this is a cache being returned to it.
+pub fn release_unused_sources() -> usize {
+    BASE.with_borrow_mut(|base| {
+        let mut freed = 0usize;
+        base.retain(|_, v| match v {
+            // the record that a sprite is missing costs nothing and saves an
+            // `open` per frame; it always stays
+            None => true,
+            Some(src) if src.used => {
+                src.used = false;
+                true
+            }
+            Some(src) => {
+                freed += (src.surf.stride() as usize) * (src.surf.height() as usize);
+                false
+            }
+        });
+        freed
+    })
+}
+
+/// Hand back every source sprite, used or not. The unconditional form, for
+/// gates and for an inventory that wants to see the floor.
+pub fn release_sources() -> usize {
+    BASE.with_borrow_mut(|base| {
+        let mut freed = 0usize;
+        base.retain(|_, v| match v {
+            None => true,
+            Some(src) => {
+                freed += (src.surf.stride() as usize) * (src.surf.height() as usize);
+                false
+            }
+        });
+        freed
+    })
+}
+
 
 // ---------------------------------------------------------------- 9-slice
 /// A panel plus the four insets that make it scale safely.

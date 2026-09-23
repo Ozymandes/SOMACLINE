@@ -66,6 +66,22 @@ impl FieldCache {
         self.entries.clear();
     }
 
+    /// (entries, bytes) currently held. The accumulators are the largest
+    /// single allocation in the program at a big window, so they are counted.
+    pub fn inventory(&self) -> (usize, usize) {
+        let b = self
+            .entries
+            .iter()
+            .map(|e| e.w * e.h * 4 * 3) // acc, acc_e, acc_h, f32 each
+            .sum();
+        (self.entries.len(), b)
+    }
+
+    /// The keys currently resident, for the ownership inventory.
+    pub fn keys(&self) -> Vec<(String, usize, usize)> {
+        self.entries.iter().map(|e| (e.key.clone(), e.w, e.h)).collect()
+    }
+
     /// Fetch (or create) the entry for (key, w, h), LRU order, bounded.
     pub fn entry(&mut self, key: &str, w: usize, h: usize) -> &mut FieldEntry {
         let stride =
@@ -84,9 +100,15 @@ impl FieldCache {
                 acc_h: vec![0.0; w * h],
             };
             self.entries.push(ent);
-            while self.entries.len() > self.limit {
-                self.entries.remove(0);
-            }
+        }
+        // An accumulator counted into a DIFFERENT buffer size can never be
+        // used again: the size follows the viewport, and the viewport does not
+        // go back without another resize, which would re-derive it anyway. The
+        // per-species limit then applies at the live size, so switching back to
+        // a trailing specimen still finds its trail. `retain` keeps LRU order.
+        self.entries.retain(|e| e.w == w && e.h == h);
+        while self.entries.len() > self.limit {
+            self.entries.remove(0);
         }
         self.entries.last_mut().unwrap()
     }

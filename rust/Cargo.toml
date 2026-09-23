@@ -2,18 +2,54 @@
 name = "abyssal"
 version = "1.0.0"
 edition = "2021"
-description = "Abyssal Organism Monitor — native Rust port"
+rust-version = "1.75"
+description = "Somacline - a computational morphology instrument: five mathematical organisms whose physiology is driven by live machine telemetry"
+readme = "../README.md"
+repository = "https://github.com/Ozymandes/SOMACLINE"
+homepage = "https://github.com/Ozymandes/SOMACLINE"
+keywords = ["morphology", "generative", "wayland", "telemetry", "winit"]
+categories = ["visualization", "gui"]
+license = "MIT"          # the source. NOT the assets or the typefaces - see LICENSING.md
+publish = false
 default-run = "abyssal"
+
+# Two hosts, one machine. The feature split is not cosmetic: it is what makes
+# the winit binary's memory number honest, because a crate-level `gtk4`
+# dependency would map and relocate the whole GTK/GDK/GSK stack (~52 MB PSS
+# before initialization — see docs/rust-migration/framework-floor.md) even if
+# not one GTK symbol were called.
+[features]
+default = ["gtk-host"]
+gtk-host = ["dep:gtk4", "dep:gdk4", "dep:gio"]
+winit-host = ["dep:winit", "dep:softbuffer"]
 
 [[bin]]
 name = "abyssal"
 path = "src/main.rs"
+required-features = ["gtk-host"]
+
+# The release binary. The crate stays `abyssal` internally (see src/lib.rs);
+# this is the name a user types.
+[[bin]]
+name = "somacline"
+path = "src/bin/abyssal-winit.rs"
+required-features = ["winit-host"]
 
 [dependencies]
-gtk4 = { version = "0.9", features = ["v4_12"] }
-gdk4 = "0.9"
+# --- host: GTK4 (reference implementation) -------------------------------
+gtk4 = { version = "0.9", features = ["v4_12"], optional = true }
+gdk4 = { version = "0.9", optional = true }
+gio = { version = "0.20", optional = true }
+# --- host: winit + softbuffer --------------------------------------------
+# wayland-csd-adwaita is deliberately off: Hyprland negotiates server-side
+# decorations, and the CSD fallback would drag in a glyph rasteriser and
+# tiny-skia for window buttons we never show.
+winit = { version = "0.30", default-features = false, features = [
+    "wayland", "wayland-dlopen", "x11", "rwh_06",
+], optional = true }
+softbuffer = { version = "0.4", optional = true }
+# --- renderer (host-independent) -----------------------------------------
 glib = "0.20"
-gio = "0.20"
 cairo-rs = { version = "0.20", features = ["png"] }
 pango = "0.20"
 pangocairo = "0.20"
