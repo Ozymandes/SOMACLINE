@@ -100,9 +100,15 @@ impl FieldCache {
                 acc_h: vec![0.0; w * h],
             };
             self.entries.push(ent);
-            while self.entries.len() > self.limit {
-                self.entries.remove(0);
-            }
+        }
+        // An accumulator counted into a DIFFERENT buffer size can never be
+        // used again: the size follows the viewport, and the viewport does not
+        // go back without another resize, which would re-derive it anyway. The
+        // per-species limit then applies at the live size, so switching back to
+        // a trailing specimen still finds its trail. `retain` keeps LRU order.
+        self.entries.retain(|e| e.w == w && e.h == h);
+        while self.entries.len() > self.limit {
+            self.entries.remove(0);
         }
         self.entries.last_mut().unwrap()
     }

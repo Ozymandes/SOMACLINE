@@ -1443,6 +1443,9 @@ mod paint_tests {
                 scale: win_ds,
             };
             crate::ui::fonts::ensure_user_fonts();
+            // The header clock is the one non-deterministic thing in a frame;
+            // two composes a millisecond apart can straddle a second boundary.
+            console::pin_clock("04:17:33");
             let opts = Options { width: lw as i32, height: lh as i32, ..Options::default() };
             let mut whole_core = Core::new(opts.clone());
             let mut dirty_core = Core::new(opts);
@@ -1505,6 +1508,7 @@ mod paint_tests {
             ds_x: pw as f64 / lw, ds_y: ph as f64 / lh, scale: win_ds,
         };
         crate::ui::fonts::ensure_user_fonts();
+        console::pin_clock("04:17:33");
         let opts = Options { width: lw as i32, height: lh as i32, ..Options::default() };
         let mut core = Core::new(opts);
         let mut dev = DeviceLayers::new();
@@ -1557,6 +1561,7 @@ mod paint_tests {
     fn releasing_the_sprite_sources_changes_no_pixel() {
         let (cache_ds, win_ds) = (1.5_f64, 1.5_f64);
         crate::ui::fonts::ensure_user_fonts();
+        console::pin_clock("04:17:33");
         let shot = |release_first: bool, lw: f64, lh: f64| -> Vec<u8> {
             let (pw, ph) = ((lw * win_ds) as i32, (lh * win_ds) as i32);
             let t = Target {

@@ -2353,7 +2353,28 @@ fn draw_footer_plain(cr: &Context, l: &Layout, r: Rect, m: &ConsoleModel) {
 // the wall clock (Python: time.strftime("%H:%M:%S"))
 // ==========================================================================
 
+/// A pinned wall clock, for gates that have to compare two frames byte for
+/// byte. The header clock is the one thing in this machine that is neither
+/// deterministic nor derived from the simulation, and it is the reason every
+/// parity table in the docs has one band above tolerance; a gate that composes
+/// the same frame twice a millisecond apart will eventually straddle a second
+/// boundary and fail for that reason alone. Test builds only.
+#[cfg(test)]
+thread_local! {
+    static PINNED_CLOCK: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Freeze the header clock at `s` for the rest of this thread's test.
+#[cfg(test)]
+pub(crate) fn pin_clock(s: &str) {
+    PINNED_CLOCK.with_borrow_mut(|c| *c = Some(s.to_string()));
+}
+
 fn clock_string() -> String {
+    #[cfg(test)]
+    if let Some(s) = PINNED_CLOCK.with_borrow(|c| c.clone()) {
+        return s;
+    }
     glib::DateTime::now_local()
         .ok()
         .and_then(|d| d.format("%H:%M:%S").ok())
@@ -2401,6 +2422,23 @@ struct LayerKey {
     mem_total: u64,
     ds: u64,
     diag: bool,
+}
+
+/// Drop every cached layer that was rendered for a DIFFERENT window geometry.
+///
+/// The window is one size at a time and cannot go back to a size it has left
+/// without re-resolving the layout, so a layer at another `(w, h, ds)` is dead
+/// the moment the new one exists - and at 1600x1000 it is 13.7 MB of dead.
+/// Entries that differ only in what the machine is SHOWING at this geometry
+/// (the behaviour word, the selected specimen) are kept: those two do flip
+/// back and forth during normal operation, which is what `LAYER_LIMIT` is for.
+///
+/// Purely a residency decision. A dropped entry costs a re-render, never a
+/// different pixel.
+fn drop_other_geometries(cache: &mut Vec<(LayerKey, Layer)>) {
+    let Some((newest, _)) = cache.last() else { return };
+    let (w, h, ds) = (newest.w, newest.h, newest.ds);
+    cache.retain(|(k, _)| k.w == w && k.h == h && k.ds == ds);
 }
 
 fn layer_key(l: &Layout, m: &ConsoleModel, mem_total: f64) -> LayerKey {
@@ -2597,6 +2635,7 @@ impl Renderer {
         surf.flush();
         let layer = self.fresh_layer(surf);
         self.under.push((key, layer.clone()));
+        drop_other_geometries(&mut self.under);
         while self.under.len() > LAYER_LIMIT {
             self.under.remove(0);
         }
@@ -2638,6 +2677,7 @@ impl Renderer {
         surf.flush();
         let layer = self.fresh_layer(surf);
         self.over.push((key, layer.clone()));
+        drop_other_geometries(&mut self.over);
         while self.over.len() > LAYER_LIMIT {
             self.over.remove(0);
         }
