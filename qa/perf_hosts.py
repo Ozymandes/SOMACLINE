@@ -34,7 +34,7 @@ def clients():
 
 def find():
     for c in clients():
-        if "byssal" in (c.get("class") or ""):
+        if "omacline" in (c.get("class") or ""):
             return c
     return None
 
@@ -75,7 +75,7 @@ def main():
         os.remove(probe)
     home_ws = json.loads(hypr("-j", "activeworkspace"))["id"]
     others = [c["address"] for c in clients()
-              if c["workspace"]["id"] == home_ws and "byssal" not in (c.get("class") or "")]
+              if c["workspace"]["id"] == home_ws and "omacline" not in (c.get("class") or "")]
 
     t_start = time.monotonic()
     p = subprocess.Popen([os.path.join(ROOT, launcher), "--probe", probe,

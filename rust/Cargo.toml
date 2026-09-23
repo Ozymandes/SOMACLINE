@@ -3,13 +3,13 @@ name = "abyssal"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
-description = "A biocomputational observation console: five procedural specimens whose physiology responds to live machine telemetry"
+description = "Somacline - a computational morphology instrument: five mathematical organisms whose physiology is driven by live machine telemetry"
 readme = "../README.md"
-repository = "https://github.com/REPLACE-ME/abyssal-organism-monitor"
-homepage = "https://github.com/REPLACE-ME/abyssal-organism-monitor"
-keywords = ["generative", "wayland", "telemetry", "cairo", "winit"]
+repository = "https://github.com/REPLACE-ME/somacline"
+homepage = "https://github.com/REPLACE-ME/somacline"
+keywords = ["morphology", "generative", "wayland", "telemetry", "winit"]
 categories = ["visualization", "gui"]
-# license = "REPLACE-ME"   # see LICENSING.md - not settled, so not declared
+license = "MIT"          # the source. NOT the assets or the typefaces - see LICENSING.md
 publish = false
 default-run = "abyssal"
 
@@ -28,8 +28,10 @@ name = "abyssal"
 path = "src/main.rs"
 required-features = ["gtk-host"]
 
+# The release binary. The crate stays `abyssal` internally (see src/lib.rs);
+# this is the name a user types.
 [[bin]]
-name = "abyssal-winit"
+name = "somacline"
 path = "src/bin/abyssal-winit.rs"
 required-features = ["winit-host"]
 

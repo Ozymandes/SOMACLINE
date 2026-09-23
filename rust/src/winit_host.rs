@@ -1,4 +1,4 @@
-//! ABYSSAL ORGANISM MONITOR — winit + softbuffer host.
+//! SOMACLINE — computational morphology instrument. winit + softbuffer host.
 //!
 //! The same machine as `app.rs` drives, with GTK removed. This file owns
 //! exactly what a host must own and nothing else: the event loop, the window,
@@ -258,7 +258,7 @@ impl ApplicationHandler for App {
             return;
         }
         let mut attrs = Window::default_attributes()
-            .with_title("Abyssal Organism Monitor")
+            .with_title("Somacline")
             .with_inner_size(LogicalSize::new(
                 self.opts.width as f64,
                 self.opts.height as f64,
@@ -268,7 +268,7 @@ impl ApplicationHandler for App {
         #[cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))]
         {
             use winit::platform::wayland::WindowAttributesExtWayland;
-            attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, "abyssal");
+            attrs = WindowAttributesExtWayland::with_name(attrs, APP_ID, "somacline");
         }
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Rc::new(w),

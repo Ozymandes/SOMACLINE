@@ -1,19 +1,23 @@
 # Assets: what ships, what does not
 
-The runtime payload is **21 MB**: the sprite set the console is manufactured
-from, and the two display faces. Everything else under `assets/` is the
+The runtime payload is **20 MB**: the sprite set the instrument is
+manufactured from, and nothing else. Everything else under `assets/` is the
 material those were generated from, and it stays in the repository for
 reproducibility without going anywhere near an install.
 
-`install.sh` copies exactly `assets/sprites` and `assets/fonts` into
-`<prefix>/share/abyssal/assets/`. Nothing else is installed.
+`install.sh` copies exactly `assets/sprites` into
+`<prefix>/share/somacline/assets/`. Nothing else is installed.
+
+**No font files ship, and none are in the repository.** Astro and Microgramma
+are third-party faces Somacline has no redistribution rights to;
+`.gitignore` excludes `assets/fonts/*.ttf` so a local copy cannot be committed
+by accident. See `LICENSING.md` and the README's *Optional typography*.
 
 ## Ships
 
 | path | size | what it is |
 |---|---:|---|
 | `assets/sprites/` | 20.15 MB, 71 PNG + 1 JSON | the hardware skin: frames, modules, lamps, mode and cycle keys, selector cells, specimen keys, parts |
-| `assets/fonts/` | 0.09 MB, 2 TTF | Astro (hero type) and Microgramma (technical type) — **see `LICENSING.md` before publishing** |
 
 ### The sprite set, by family
 
@@ -46,6 +50,8 @@ shrink, that is where to look — with a runtime trace, not a grep.
 | `assets/hardware_v2/` | 177 MB | the hardware generation archive: 2K masters, rejected candidates, contact sheet. Mostly untracked by git already |
 | `references/` | 3.3 MB | the two reference images the console was matched to |
 | `docs/shots/` | 20 MB | product screenshots and reference comparisons |
+| `assets/fonts/` | — | empty in the repository; whatever the operator puts there, registered at runtime, never installed |
+| `docs/brand/` | 5.3 MB | the SOMACLINE banner and logo sheet — README and branding, not runtime |
 | `abyssal/` | 0.3 MB | the Python reference implementation — the parity oracle, not a second product |
 | `qa/`, `tools/` | 0.2 MB | harnesses and the asset build pipeline |
 | `rust/tests/golden/` | 5.9 MB | golden fixture dumps for the parity gates |
@@ -57,15 +63,15 @@ shrink, that is where to look — with a runtime trace, not a grep.
 
 1. `$ABYSSAL_ASSETS/<kind>` — an outright override, for anything unusual;
 2. `$CARGO_MANIFEST_DIR/../assets/<kind>` — running from a checkout via cargo;
-3. `<exe>/../share/abyssal/assets/<kind>` — installed at `<prefix>/bin`;
-4. `<exe>/../../share/abyssal/assets/<kind>` — installed at `<prefix>/lib/abyssal`;
+3. `<exe>/../share/somacline/assets/<kind>` — installed at `<prefix>/bin`;
+4. `<exe>/../../share/somacline/assets/<kind>` — installed at `<prefix>/lib/somacline`;
 5. `<exe>/../../../assets/<kind>` and one level further — `rust/target/release`;
-6. `/usr/share/abyssal/assets/<kind>`;
+6. `/usr/share/somacline/assets/<kind>`;
 7. `assets/<kind>` relative to the working directory.
 
 The first candidate that actually holds the asset wins — it probes rather than
 assumes. A missing asset is never fatal: the console runs on its fallbacks.
 
 Verified: with the repository's `assets/` directory renamed away, a binary
-installed into a scratch prefix rendered the full console — typography,
-sprites, selector bank, 60 FPS — from `<prefix>/share/abyssal/assets`.
+installed into a scratch prefix rendered the full instrument — sprites,
+selector bank, 60 FPS — from `<prefix>/share/somacline/assets`.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RELEASE GATE: residency under sustained real use.
 
-    python3 qa/release_soak.py rust/target/release/abyssal-winit [rounds]
+    python3 qa/release_soak.py rust/target/release/somacline [rounds]
 
 Each round drives the real window through every specimen, the cycle and mode
 keys, a fullscreen round trip, three floating sizes and a retile, then waits
@@ -18,7 +18,7 @@ def hypr(*a): return subprocess.run(["hyprctl",*a],capture_output=True,text=True
 def dsp(c): hypr("dispatch",c)
 def app():
     for c in json.loads(hypr("-j","clients")):
-        if "byssal" in (c.get("class") or ""): return c
+        if "omacline" in (c.get("class") or ""): return c
 def active(): return json.loads(hypr("-j","activewindow")).get("address")
 def mem(pid):
     o={}
@@ -35,7 +35,7 @@ def fds(pid):
     return out
 
 binary = sys.argv[1]; rounds = int(sys.argv[2]) if len(sys.argv)>2 else 6
-subprocess.run(["pkill","-x","abyssal-winit"]); time.sleep(1)
+subprocess.run(["pkill","-x","somacline"]); time.sleep(1)
 p = subprocess.Popen([binary,"--quit-after","400"],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 w=None; t0=time.monotonic()
 while w is None and time.monotonic()-t0 < 20:

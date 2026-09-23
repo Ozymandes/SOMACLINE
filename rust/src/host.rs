@@ -27,7 +27,7 @@ use crate::ui::console::{self, CtlKind, ConsoleModel, Layer, Renderer};
 use crate::ui::debug::{self, DebugInfo};
 use crate::viewport::{self, Viewport};
 
-pub const APP_ID: &str = "dev.abyssal.OrganismMonitor";
+pub const APP_ID: &str = "dev.somacline.Somacline";
 /// Telemetry cadence. /proc and /sys are read here and ONLY here - never at
 /// render rate. 5 Hz gives every 60-second graph 300 samples.
 pub const TELEMETRY_HZ: f64 = 5.0;

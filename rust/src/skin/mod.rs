@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// - **a checkout**, where the binary sits in `rust/target/release/` and the
 ///   assets are two or three levels up;
 /// - **an install**, where the binary is in `<prefix>/bin/` (or
-///   `<prefix>/lib/abyssal/`) and the assets are in
+///   `<prefix>/lib/somacline/`) and the assets are in
 ///   `<prefix>/share/abyssal/assets/`;
 /// - **anything else**, which is what `ABYSSAL_ASSETS` is for - it names the
 ///   assets directory outright and is tried before everything.
@@ -34,15 +34,15 @@ pub fn asset_roots(kind: &str) -> Vec<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
         for up in [
-            "../share/abyssal/assets",      // <prefix>/bin        -> <prefix>/share
-            "../../share/abyssal/assets",   // <prefix>/lib/abyssal -> <prefix>/share
+            "../share/somacline/assets",    // <prefix>/bin          -> <prefix>/share
+            "../../share/somacline/assets", // <prefix>/lib/somacline -> <prefix>/share
             "../../../assets",              // <repo>/rust/target/release
             "../../../../assets",
         ] {
             v.push(dir.join(up).join(kind));
         }
     }
-    v.push(PathBuf::from("/usr/share/abyssal/assets").join(kind));
+    v.push(PathBuf::from("/usr/share/somacline/assets").join(kind));
     v.push(PathBuf::from("assets").join(kind));
     v
 }

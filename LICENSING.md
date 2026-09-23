@@ -1,56 +1,67 @@
-# Licensing — unresolved, and blocking publication
+# Licensing
 
-Two things must be settled by a human before this repository is made public.
-Neither is a code problem and neither was decided here.
+## The source code — MIT
 
-## 1. There is no project licence
+Everything in `rust/`, `abyssal/`, `qa/`, `tools/`, `install.sh` and the
+documentation is MIT licensed. See [`LICENSE`](LICENSE).
 
-There is no `LICENSE` file and `rust/Cargo.toml` declares no `license` field
-(the key is present but commented out, pointing here). Without one, the
-default is "all rights reserved": nobody may legally copy, modify or
-redistribute the work, which is usually not what publishing intends.
+> The copyright line reads "The Somacline authors". Replace it with your legal
+> name or entity before you publish if you want the attribution to be personal.
 
-**Action:** choose a licence, add `LICENSE` at the repository root, and set
-`license = "..."` in `rust/Cargo.toml`.
+MIT is compatible with everything Somacline depends on. The Rust crates
+(`winit`, `softbuffer`, `cairo-rs`, `pango`, `pangocairo`, `glib`, and the
+optional `gtk4`/`gdk4`/`gio` used only by the development reference build) are
+MIT or MIT/Apache-2.0. The system libraries the binary links against — cairo,
+pango, fontconfig, freetype, harfbuzz, glib — are LGPL or similar, and are
+**dynamically** linked, which MIT source does not conflict with.
 
-## 2. The two bundled typefaces have no stated provenance
+## What MIT does NOT cover
 
-`assets/fonts/` ships two TrueType files, and the application **installs them
-into the user's font directory** (`~/.local/share/fonts/abyssal/`) and runs
-`fc-cache` on first launch — `rust/src/ui/fonts.rs`. That is redistribution,
-and redistribution needs a licence that permits it.
+MIT covers the code. It does not, and cannot, relicense anything third-party
+that the project merely uses or generates from.
 
-| file | size | family used as | provenance |
-|---|---:|---|---|
-| `astro.ttf` | 10,608 B | `Astro` — hero type | not documented anywhere in this repository |
-| `microgrammanormal.ttf` | 80,644 B | `Microgramma` — technical type | not documented anywhere in this repository |
+### Typefaces — not distributed at all
 
-**Microgramma is a commercial typeface** (Aldo Novarese and Alessandro Butti,
-1952; rights held by Monotype/Linotype). A file named `microgrammanormal.ttf`
-is the characteristic shape of a free-download-site redistribution of it. If
-that is what this is, shipping it in a public repository is a copyright
-problem regardless of how the rest of the project is licensed.
+**No font files are in this repository or in any release package.**
 
-**Action, one of:**
+The instrument's typography is designed around two third-party faces:
 
-- **Verify and document.** If a licence permitting redistribution exists for
-  both files, add it under `assets/fonts/` and record it here.
-- **Substitute.** Replace with libre faces of similar character and re-check
-  parity. This changes the typography, so it changes the product's look — it
-  is a design decision, not a packaging one.
-- **Stop bundling.** Remove the files and let `ui/fonts.rs` fall through to
-  its existing fallback. The code already fails soft: the console runs on its
-  mono fallback if the faces are absent. The machine will not look the same.
+| family | role | where to get it |
+|---|---|---|
+| **Microgramma** | technical type: labels, rails, microcopy | <https://online-fonts.com/fonts/microgramma> |
+| **Astro** | hero type: major titles | <https://www.dafont.com/astro.font> |
 
-The code path is deliberately untouched so that whichever route is chosen
-works without further changes: `ensure_user_fonts` installs whatever is in
-`assets/fonts/` and does nothing at all if the directory is empty.
+Install either one from a source and under a licence appropriate to your own
+use. Microgramma is a commercial typeface with a long history of unlicensed
+redistribution; the link above is a convenience for finding it, not a statement
+that the download there is free or licensed for your purposes — check for
+yourself. The DaFont page for Astro currently lists it as 100% free.
 
-## Not blocking, but worth a line in the README
+Somacline runs without both of them. See README, *Optional typography*.
 
-- The five specimens are ports of published generative sketches. Their
-  equations are reproduced verbatim in `rust/src/sources.rs`, with the
-  original source text kept alongside each port. Attribution for those
-  sketches belongs in the acknowledgements.
-- The hardware sprite set was generated with an image model; the generation
-  log is in `assets/modules/GENERATIONS.md`.
+`.gitignore` excludes `assets/fonts/*.ttf` so a local copy cannot be committed
+by accident. `rust/src/ui/fonts.rs` registers whatever the operator has put
+there, on the operator's own machine, and does nothing when the directory is
+empty.
+
+### Generated assets
+
+The hardware sprite set in `assets/sprites/` and the design sources under
+`assets/modules/` and `assets/hardware_v2/` were produced with an image
+generation model against fixed references. The generation log — every prompt,
+setting and reference — is in `assets/modules/GENERATIONS.md`. Whatever terms
+attach to that model's output attach to these files; they are not covered by
+the MIT grant above.
+
+### Brand
+
+`docs/brand/` and `packaging/icons/` contain the SOMACLINE wordmark, logo and
+banner. Trade marks are not licensed by MIT. Forks should replace them rather
+than ship them.
+
+### The organisms
+
+The five specimens are ports of published generative sketches. Each source is
+reproduced verbatim alongside its port in `rust/src/sources.rs`, and the
+mathematics is credited in the README acknowledgements. The ports are MIT; the
+original sketches belong to their authors.

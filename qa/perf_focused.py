@@ -25,7 +25,7 @@ def dispatch(c): return hypr("dispatch", c)
 def clients(): return json.loads(hypr("-j", "clients"))
 def find():
     for c in clients():
-        if "byssal" in (c.get("class") or ""): return c
+        if "omacline" in (c.get("class") or ""): return c
     return None
 def cpu_ticks(pid):
     f = open(f"/proc/{pid}/stat").read()
@@ -47,12 +47,12 @@ def main():
     a = sys.argv[3:]
     g = lambda k, d: (type(d))(a[a.index(k)+1]) if k in a else d
     w, h, dwell, warm = g("--w",781), g("--h",468), g("--dwell",10.0), g("--warm",4.0)
-    probe = os.path.join(os.environ.get("ABYSSAL_QA_OUT", "/tmp"), f"abyssal-perf-{label}.jsonl")
+    probe = os.path.join(os.environ.get("SOMACLINE_QA_OUT", "/tmp"), f"somacline-perf-{label}.jsonl")
     os.makedirs(os.path.dirname(probe), exist_ok=True)
     if os.path.exists(probe): os.remove(probe)
     home_ws = json.loads(hypr("-j", "activeworkspace"))["id"]
     others = [c["address"] for c in clients()
-              if c["workspace"]["id"] == home_ws and "byssal" not in (c.get("class") or "")]
+              if c["workspace"]["id"] == home_ws and "omacline" not in (c.get("class") or "")]
     t0 = time.monotonic()
     p = subprocess.Popen([os.path.join(ROOT, launcher), "--probe", probe,
                           "--quit-after", str(dwell + warm + 40)],

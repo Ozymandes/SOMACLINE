@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """RELEASE GATE: every documented control must change what the window SHOWS.
 
-    python3 qa/release_interaction.py rust/target/release/abyssal-winit
+    python3 qa/release_interaction.py rust/target/release/somacline
 
 Asserts on pixels, not on intent: each control is driven against the real
 window and the result is read back off the screen.
@@ -20,17 +20,17 @@ Two things about this environment, learned the hard way:
 import json, os, subprocess, sys, time
 import numpy as np
 from PIL import Image
-S = os.environ.get("ABYSSAL_QA_OUT", "/tmp/abyssal-qa")
+S = os.environ.get("SOMACLINE_QA_OUT", "/tmp/somacline-qa")
 os.makedirs(S, exist_ok=True)
 def hypr(*a): return subprocess.run(["hyprctl",*a],capture_output=True,text=True).stdout.strip()
 def dsp(c): hypr("dispatch",c)
 def app():
     for c in json.loads(hypr("-j","clients")):
-        if "byssal" in (c.get("class") or ""): return c
+        if "omacline" in (c.get("class") or ""): return c
 def active(): return json.loads(hypr("-j","activewindow")).get("address")
 
 BIN = sys.argv[1]
-subprocess.run(["pkill","-x","abyssal-winit"]); time.sleep(1)
+subprocess.run(["pkill","-x","somacline"]); time.sleep(1)
 p = subprocess.Popen([BIN,"--quit-after","300","--width","900","--height","700"],
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 w=None; t0=time.monotonic()

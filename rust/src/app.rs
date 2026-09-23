@@ -1,4 +1,4 @@
-//! ABYSSAL ORGANISM MONITOR — GTK4 host. Port of app.py.
+//! SOMACLINE — GTK4 host, kept as the development reference. Port of app.py.
 //!
 //! This file is now ONLY the GTK adaptation layer: window, widget, frame
 //! clock, GDK textures, GTK event controllers. Everything it decides with is
@@ -341,7 +341,7 @@ impl MonitorView {
 fn build_window(app: &Application, opts: &Options) -> MonitorView {
     let win = ApplicationWindow::builder()
         .application(app)
-        .title("Abyssal Organism Monitor")
+        .title("Somacline")
         .default_width(opts.width)
         .default_height(opts.height)
         .build();
