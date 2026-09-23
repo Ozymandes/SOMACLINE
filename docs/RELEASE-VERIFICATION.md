@@ -9,7 +9,7 @@ Everything below was run against the shipping build on this machine
 | | |
 |---|---|
 | clean build | `cargo clean` removed 10 207 files / 8.1 GiB, then a full release build of the winit host in **45.7 s** |
-| binary | `abyssal-winit`, **2.58 MB**, stripped, LTO, `panic = "abort"` |
+| binary | `somacline`, **2.58 MB**, stripped, LTO, `panic = "abort"` |
 | warnings | **0** in the library, both feature sets |
 
 ## Tests

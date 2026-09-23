@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One controlled steady-state performance sample, focused.
 
-    python3 qa/perf_focused.py run-rust-winit.sh winit --dwell 10 [--all]
+    python3 qa/perf_focused.py run-somacline.sh winit --dwell 10 [--all]
 
 Why this exists alongside `qa/perf_hosts.py`: that harness can report a
 FOCUSED figure measured on an UNFOCUSED window. Its `hl.dsp.focus` fails

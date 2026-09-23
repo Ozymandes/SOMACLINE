@@ -2,7 +2,7 @@
 """One controlled perf sample per host, in an IDENTICAL floating window.
 
     python3 qa/perf_hosts.py run-rust.sh       gtk   --dwell 8
-    python3 qa/perf_hosts.py run-rust-winit.sh winit --dwell 8
+    python3 qa/perf_hosts.py run-somacline.sh winit --dwell 8
 
 Four window states are measured: focused, unfocused-but-visible, covered by a
 fullscreen window (TRUE occlusion), and moved to a workspace that is not on
@@ -19,7 +19,7 @@ Hyprland 0.56.2 notes, learned the hard way:
 """
 import json, os, subprocess, sys, time
 
-ROOT = "/home/seeno/abyssal-organism-monitor"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TICK = os.sysconf("SC_CLK_TCK")
 SCRATCH_WS = 4   # must already exist: change_id will not create one
 

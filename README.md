@@ -2,7 +2,9 @@
 
 <img src="docs/brand/somacline-banner.png" alt="SOMACLINE — Computational Morphology Instrument" width="100%">
 
-**Five mathematical organisms, kept alive by your machine.**
+**SOMACLINE** — a computational morphology instrument for Linux.
+
+**System telemetry becomes the physiology of living mathematical organisms.**
 
 `Rust` · `winit + softbuffer` · `cairo + pango` · `no GPU` · `no GTK` · `2 threads` · `~46 MB` · `60 FPS`
 
@@ -161,7 +163,7 @@ and a Rust toolchain to build. Developed and verified on Wayland (Hyprland);
 winit's X11 backend is compiled in but untested here.
 
 ```sh
-git clone https://github.com/REPLACE-ME/somacline
+git clone https://github.com/Ozymandes/SOMACLINE
 cd somacline
 ./install.sh
 ```
@@ -211,6 +213,33 @@ lists it as 100% free.
 Either put the `.ttf` files wherever fontconfig already looks
 (`~/.local/share/fonts/`), or drop them into `assets/fonts/` in a checkout and
 Somacline will register them for you on next launch.
+
+## Linux, Wayland, Hyprland
+
+Somacline is a Wayland-native application. It draws with cairo into the
+compositor's shared-memory buffer through softbuffer — **no GPU, no OpenGL, no
+Vulkan, no GTK**, and no GPU driver loaded into the process. Forty shared
+objects, two threads.
+
+It was developed and verified on **Hyprland 0.56.2** under Omarchy, at display
+scale 1.6, including fractional scaling, tiling, floating, fullscreen and
+workspace transitions. winit's X11 backend is compiled in but is untested
+here.
+
+The frame loop is driven by the compositor's own frame callbacks rather than a
+timer, so the instrument never runs ahead of the display — and when a surface
+stops receiving callbacks, because it is covered or on another workspace, the
+simulation stops with it. That is where the 0.12 % figure comes from. On
+resume, elapsed time is clamped so nothing teleports.
+
+**A note for Omarchy users.** Omarchy applies a default window opacity to
+every window. Against a near-black instrument the wallpaper shows faintly
+through — that is the desktop's setting, not this application. To make it
+fully opaque, add to your Hyprland config:
+
+```lua
+o.window("dev.somacline.Somacline", { tag = "-default-opacity", opacity = "1 1" })
+```
 
 ## Controls
 
