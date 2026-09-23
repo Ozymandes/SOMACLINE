@@ -3,6 +3,12 @@
 Status: **COMPLETE AND MEASURED.** The GTK host is untouched and remains the
 canonical launcher, the oracle and the fallback.
 
+> **Superseded numbers.** Everything below is the migration as it landed. The
+> runtime optimisation pass that followed it took PSS 83.4 -> ~46 MB and
+> focused CPU 23.6 % -> ~15.5 %; see **`OPTIMIZATION.md`**. In particular the
+> "one clean baseline" table and the "reading the CPU number" section describe
+> the state BEFORE dirty-region composition existed.
+
     ./run-rust.sh         Rust + GTK4      (reference, canonical)
     ./run-rust-winit.sh   Rust + winit + softbuffer
     ./run-python.sh       Python + GTK4    (golden reference)

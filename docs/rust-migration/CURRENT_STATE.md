@@ -5,11 +5,24 @@ RUST CORE HEALTHY
 VISUAL PARITY RESTORED
 HIDPI PATH GATED
 WINIT + SOFTBUFFER HOST LANDED AND MEASURED
-OPTIMIZATION STILL PAUSED
+RUNTIME OPTIMISATION PASS COMPLETE
 
-Updated 2026-09-23 after the winit + softbuffer host migration. The section
-below the parity table is the GTK repair snapshot and still stands; the host
-migration has its own document.
+Updated 2026-09-23 after the runtime optimisation pass. The sections below the
+parity table are the GTK repair snapshot and the migration baseline; both still
+stand as history. The optimisation pass has its own document,
+**`OPTIMIZATION.md`**, and its numbers supersede the winit column everywhere.
+
+Headline, same window (781x468 logical at monitor scale 1.6, INSTRUMENT):
+
+| | Python + GTK | Rust + GTK | Rust + winit, migrated | **Rust + winit, now** |
+|---|---:|---:|---:|---:|
+| PSS | 222.0 MB | 184.9 MB | 83.4 MB | **44.6-47.8 MB** |
+| CPU, focused | 21.2 % | 17.5 % | 23.6 % | **15.1-16.0 %** |
+| draw, windowed mean | 2.28 ms | 0.65 ms | 2.66 ms | **1.09-1.29 ms** |
+| threads | 26 | 11 | 2 | **2** |
+
+The winit build is now below the GTK reference on BOTH axes, which the
+migration had traded away, and 4.7x lighter than the Python original.
 
 ## Hosts
 
@@ -154,8 +167,17 @@ or the capture rect and the surface disagree and the shot shows black margins.
 - The live clock cannot be pinned from either harness, so a fully byte-exact
   cross-language frame comparison would need a clock override in both.
 - Allocator and SIMD work are still deliberately untouched.
-- Winit/Softbuffer is now DONE — see `WINIT-SOFTBUFFER.md`. What remains open
-  there: cairo/pango are still in (measured at ~13.7 MB file-backed, so the
-  case for replacing them is now a numbers question, not an ideological one),
-  and dirty-rectangle composition is the named next move if the +6 points of
-  focused CPU ever outweigh the 101 MB of memory it bought.
+- Winit/Softbuffer is DONE — see `WINIT-SOFTBUFFER.md`.
+- Runtime optimisation is DONE — see `OPTIMIZATION.md`. Dirty-rectangle
+  composition was the named next move and it has been taken. Cairo/pango were
+  the other open question and the numbers closed it: with harfbuzz, fontconfig
+  and freetype they are ~3.1 MB PSS of ~14.7 MB file-backed, so replacing them
+  buys nothing worth the parity cost.
+- What is left is the simulation and the point-field raster — the equations and
+  the bit-exact numpy-equivalent accumulation, which are ~8 of the remaining
+  ~15.5 CPU points. Going lower means changing the mathematics, not the host.
+- `qa/perf_hosts.py` can report a FOCUSED figure measured on an UNFOCUSED
+  window: its `hl.dsp.focus` fails silently often enough to matter, and the app
+  then runs its 30 FPS cadence for the whole dwell (~13 % instead of ~24 %).
+  Assert `activewindow == addr` before and after the dwell, and reject any
+  sample whose FPS is not the focused cadence.
